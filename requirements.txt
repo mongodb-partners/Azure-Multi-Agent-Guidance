@@ -1,0 +1,27 @@
+# =============================================================================
+# Core runtime — everything the default demo needs (ORCHESTRATOR_MODE=classifier).
+# Specialists run on the Azure OpenAI *Responses API* (openai SDK) with hosted MongoDB
+# MCP, so the Foundry Agents SDK and Microsoft Agent Framework are NOT required here.
+# For the optional `maf-handoff` orchestration toggle, also: pip install -r requirements-maf.txt
+# =============================================================================
+
+# --- Azure auth (keyless fallback via DefaultAzureCredential) ---
+azure-identity>=1.19.0
+
+# --- Azure OpenAI (specialists via Responses API + classifier/synth/embeddings) ---
+openai>=1.40.0
+
+# --- API layer ---
+fastapi>=0.110.0
+uvicorn[standard]>=0.29.0
+sse-starlette>=2.1.0
+pydantic>=2.6.0
+python-dotenv>=1.0.1
+pyyaml>=6.0.1
+
+# --- MongoDB Atlas (memory + retrieval + seeding) ---
+pymongo>=4.7.0
+
+# --- UI ---
+streamlit>=1.35.0
+requests>=2.31.0

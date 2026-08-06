@@ -1,0 +1,20 @@
+# Keep the ACR/Docker build context small. The hosted image only needs src/ + config/
+# + the two requirements files (see deploy/Dockerfile.hosted); everything below is dev-only.
+.venv
+.venv-foundry
+.venv-maf
+__pycache__
+*.pyc
+.pytest_cache
+.mypy_cache
+.ruff_cache
+.git
+.gitignore
+.env
+.env.*
+*.log
+.DS_Store
+notebooks
+tests
+docs
+ui

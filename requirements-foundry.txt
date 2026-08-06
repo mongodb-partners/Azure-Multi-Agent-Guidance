@@ -1,0 +1,10 @@
+# Optional stack: Foundry-native agents (new Azure AI Foundry Agent Service, Responses-based).
+# Install ONLY when registering prompt agents (SPECIALIST_MODE=registered) or building the
+# hosted whole-solution agent:  pip install -r requirements-foundry.txt
+#
+# NOTE: this is an ALTERNATIVE optional stack to requirements-maf.txt (which pins older
+# azure-ai-* for the classic MAF path) — do not install both into the same environment.
+azure-ai-projects>=2.4.0          # new Agent Service: prompt + hosted agent provisioning
+azure-ai-agentserver-responses>=2.0.0b1   # hosted-agent Responses protocol server (Stage 3)
+azure-identity>=1.25.0
+openai>=2.0.0
