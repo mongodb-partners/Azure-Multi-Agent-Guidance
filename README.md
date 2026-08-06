@@ -1,19 +1,19 @@
 # MongoDB × Azure AI Foundry — Multi-Agent Career Assistant
 
-An Azure/Microsoft port of the AWS reference
-[`mongodb-partners/Multi-Agent-Architectural-Guidance-Bedrock-AgentCore`](https://github.com/mongodb-partners/Multi-Agent-Architectural-Guidance-Bedrock-AgentCore).
+> This project is an **Azure / Microsoft** stack based multi-agent "Career Assistant"
+> with **MongoDB Atlas** at its core.  
 
-It keeps the same **MongoDB-centric** "Career Assistant" scenario and swaps the AWS/Strands stack for:
+It runs a **MongoDB-centric** "Career Assistant" scenario on the following stack:
 
-| Reference (AWS/Strands) | This demo (Azure/MAF) |
+| Component | This demo |
 |---|---|
-| Strands Agents SDK | **Microsoft Agent Framework (MAF)**, Python |
-| Bedrock AgentCore Runtime | **Azure AI Foundry Agent Service** (one agent per specialist) |
-| Bedrock Claude / Titan | **Azure OpenAI / Foundry** deployments (`gpt-5.6-sol`, `text-embedding-3-large`) |
-| AgentCore Gateway | Foundry **MCP tool** → MongoDB MCP on Container Apps |
-| AgentCore Memory | **MongoDB** short-term (`chat_messages`) + long-term facts (`agent_memory_facts`) |
-| Bun/Hono API + SSE | **FastAPI** + SSE |
-| Terraform | **Bicep** |
+| Agent framework | **Microsoft Agent Framework (MAF)**, Python |
+| Agent runtime | **Azure AI Foundry Agent Service** (one agent per specialist) |
+| Models | **Azure OpenAI / Foundry** deployments (`gpt-5.6-sol`, `text-embedding-3-large`) |
+| Tool gateway | Foundry **MCP tool** → MongoDB MCP on Container Apps |
+| Memory | **MongoDB** short-term (`chat_messages`) + long-term facts (`agent_memory_facts`) |
+| API | **FastAPI** + SSE |
+| Infra-as-code | **Bicep** |
 
 Four specialists ship: `orchestrator`, `job-match`, `career-coach`, `company-intel`.
 
@@ -78,7 +78,7 @@ User ── Streamlit UI ──HTTP──▶ FastAPI /chat (SSE)
 ```
 
 ### Orchestration modes (`ORCHESTRATOR_MODE`)
-- **`classifier`** *(default)* — ported custom router. Deterministic, fast, faithful to the reference. When two specialists are selected, a synthesizer (`gpt-5.6-sol`) merges their answers.
+- **`classifier`** *(default)* — custom router. Deterministic and fast. When two specialists are selected, a synthesizer (`gpt-5.6-sol`) merges their answers.
 - **`maf-handoff`** — MAF's built-in handoff/group-chat orchestration; a triage agent delegates dynamically among the Foundry specialists. Showcases the framework.
 
 Build/verify `classifier` first, then flip the toggle to demo `maf-handoff`.
@@ -116,5 +116,5 @@ deploy/           Bicep + deploy.sh
 
 ## Production hardening (out of scope for v1)
 
-Private Endpoint / VNET peering to Atlas · Entra ID (Cognito-parity) JWT auth ·
+Private Endpoint / VNET peering to Atlas · Entra ID JWT auth ·
 App Insights / Azure Monitor observability · Key Vault secret hardening · rate limiting.
