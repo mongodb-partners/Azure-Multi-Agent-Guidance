@@ -6,7 +6,8 @@
 #
 # Reads app config from ../.env (see .env.sample). Builds deploy/Dockerfile.hosted in ACR,
 # then registers it as a HostedAgentDefinition on the Foundry project and polls until ACTIVE.
-# The Foundry project + model deployment and the MongoDB MCP server are REUSED, not created.
+# The Foundry project + model deployment are REUSED. The self-hosted MongoDB MCP server must
+# already be deployed (deploy.sh) and reachable at MONGODB_MCP_URL.
 #
 # Prereqs:  az login  •  pip install -r requirements-foundry.txt  •  an existing ACR
 #           (reuses ACR_NAME from ../.env.live if deploy.sh created one; else pass ACR_NAME=…).
@@ -28,7 +29,12 @@ else
   exit 1
 fi
 : "${AZURE_AI_PROJECT_ENDPOINT:?set in .env}"
-: "${MONGODB_MCP_URL:?set in .env}"
+# The self-hosted MCP endpoint (deploy.sh writes it to .env.live) — reuse it if present.
+if [[ -z "${MONGODB_MCP_URL:-}" && -f "$ROOT_DIR/.env.live" ]]; then
+  MONGODB_MCP_URL="$(grep -E '^MONGODB_MCP_URL=' "$ROOT_DIR/.env.live" | cut -d= -f2- || true)"
+  MCP_API_KEY_HEADER="${MCP_API_KEY_HEADER:-$(grep -E '^MCP_API_KEY_HEADER=' "$ROOT_DIR/.env.live" | cut -d= -f2- || true)}"
+fi
+: "${MONGODB_MCP_URL:?set in .env / .env.live (self-hosted MCP endpoint, e.g. https://<app>.azurecontainerapps.io/mcp)}"
 
 # ---- Resolve ACR (reuse deploy.sh's if present) ----
 if [[ -z "${ACR_NAME:-}" && -f "$ROOT_DIR/.env.live" ]]; then
@@ -75,7 +81,8 @@ az acr build -r "$ACR_NAME" -t "career-hosted:$TAG" -f "$SCRIPT_DIR/Dockerfile.h
 # ---- Register the hosted agent + poll to ACTIVE ----
 PY="${PYTHON:-python}"
 echo "==> Registering hosted agent '$AGENT_NAME' on $AZURE_AI_PROJECT_ENDPOINT"
-"$PY" -m scripts.provision_hosted --image "$IMAGE" --name "$AGENT_NAME"
+# Run from the project root (PYTHONPATH) so `-m scripts.provision_hosted` resolves the package.
+PYTHONPATH="$ROOT_DIR" "$PY" -m scripts.provision_hosted --image "$IMAGE" --name "$AGENT_NAME"
 
 echo ""
 echo "============================================================"

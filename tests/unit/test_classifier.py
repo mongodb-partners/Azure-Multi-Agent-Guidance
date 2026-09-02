@@ -10,6 +10,8 @@ import pytest
 
 from src.classifier import classify
 
+pytestmark = pytest.mark.unit
+
 
 @pytest.mark.parametrize(
     "query, expected",

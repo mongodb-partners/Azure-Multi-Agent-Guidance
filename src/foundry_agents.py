@@ -1,17 +1,21 @@
-"""Foundry specialists — Azure OpenAI **Responses API** + hosted MongoDB MCP tool.
+"""Foundry specialists — hosted on the **Azure AI Foundry Agent Service**.
 
-Each routable agent in `config/agents/` becomes one specialist that runs a single Responses
-turn: `client.responses.create(model, instructions, input, tools=[mongodb-mcp])`. The service
-connects to the MongoDB MCP Container App itself and auto-approves tool calls.
+Each routable agent in `config/agents/` is registered as a persistent Foundry prompt agent
+(see `foundry_registry.py` / `scripts/provision_agents.py`) and invoked by name. The Foundry
+runtime executes the agent, including its MongoDB MCP tool calls, and auto-approves them.
 
-Why Responses and not the classic Agents threads+runs API: the deployed chat model is a
-reasoning-class deployment (gpt-5.x), and the Agents run loop force-injects `top_p`, which
-those models reject (`invalid_prompt: 'top_p' is not supported`). The Responses API supports
-reasoning models and hosted MCP natively, so specialists use it directly.
+Foundry prompt agents are Responses-based, so they support the reasoning-class chat models
+(gpt-5.x) and hosted MCP natively — no classic Agents threads+runs top_p trap.
+
+Execution is controlled by `SPECIALIST_MODE`:
+  - registered-or-inline (default) — invoke the registered Foundry agent; if the Foundry
+    resource/SDK is unavailable, fall back to a raw Responses turn in-process (inline).
+  - registered — strict: only the registered Foundry agent (error if unavailable).
+  - inline / disabled — always run inline via the raw Responses API (no Foundry registration).
 
 `stream_query` yields structured `Event`s (status / tool_call / message / error) so the
 FastAPI layer can relay them over SSE and the UI can render a trace. The event interface is
-unchanged from the previous implementation, so the orchestrator needs no changes.
+identical across modes, so the orchestrator and UI need no changes.
 """
 from __future__ import annotations
 
@@ -76,6 +80,48 @@ class _FallbackToInline(Exception):
     """Signals the registered path is unusable *before any event is emitted* — safe to retry inline."""
 
 
+def _explain_error(err: Any) -> str:
+    """Turn an opaque Responses/stream error into an actionable message.
+
+    A 424 "Failed Dependency" means the agent's MongoDB MCP tool call was rejected by the
+    self-hosted MCP server — usually the MCP endpoint is unreachable (wrong `MONGODB_MCP_URL` /
+    Container App down) or the MCP API-key header is missing/incorrect. Surface that instead of a
+    bare `424: None`.
+    """
+    text = str(err) if err is not None else ""
+    code = getattr(err, "code", None) or getattr(err, "status_code", None)
+    blob = f"{text} {code or ''}"
+    if "424" in blob or "Failed Dependency" in blob:
+        return (
+            f"{text or '424 Failed Dependency'} — the MongoDB MCP tool call was rejected. "
+            "Check that MONGODB_MCP_URL points at the running self-hosted MCP Container App and, "
+            "if the endpoint requires it, that MCP_API_KEY / MCP_API_KEY_HEADER are set correctly."
+        )
+    return text or repr(err)
+
+
+def _record_response_usage(resp: Any) -> None:
+    """Record one specialist LLM call + its token usage into the in-memory metrics store."""
+    try:
+        from . import telemetry
+
+        telemetry.record_llm_call()  # one specialist Responses turn
+        usage = getattr(resp, "usage", None)
+        if not usage:
+            return
+        # Responses API usage fields: input_tokens / output_tokens / total_tokens.
+        prompt = int(getattr(usage, "input_tokens", 0) or getattr(usage, "prompt_tokens", 0) or 0)
+        completion = int(
+            getattr(usage, "output_tokens", 0) or getattr(usage, "completion_tokens", 0) or 0
+        )
+        total = int(getattr(usage, "total_tokens", 0) or (prompt + completion))
+        telemetry.record_tokens(prompt, kind="prompt")
+        telemetry.record_tokens(completion, kind="completion")
+        telemetry.note_tokens(prompt=prompt, completion=completion, total=total)
+    except Exception:  # noqa: BLE001
+        pass
+
+
 class FoundrySpecialist:
     """One specialist: a config-driven Responses turn bound to the MongoDB MCP tool."""
 
@@ -83,7 +129,6 @@ class FoundrySpecialist:
         self.cfg = cfg
         self.instructions = instructions
         self.client = client or _responses_client()
-        self.mcp = mcp_tool_dict()
 
     @property
     def name(self) -> str:
@@ -126,12 +171,16 @@ class FoundrySpecialist:
     def _stream_query_inline(
         self, query: str, previous_response_id: str | None = None
     ) -> Iterator[Event]:
-        """Inline path: a raw Responses turn with the MCP tool attached to this process's client."""
+        """Inline path: a raw Responses turn with the MCP tool attached to this process's client.
+
+        The MCP tool is built from `mcp_tool_dict()` each turn. Auth to the self-hosted MCP is a
+        static API-key header (no expiring token), so there is nothing to refresh.
+        """
         kwargs: dict[str, Any] = {
             "model": self.cfg.model or get_settings().chat_deployment,
             "instructions": self.instructions,
             "input": query,
-            "tools": [self.mcp],
+            "tools": [mcp_tool_dict()],
             "stream": True,
         }
         if previous_response_id:
@@ -209,15 +258,16 @@ class FoundrySpecialist:
                     resp = getattr(event, "response", None)
                     final_text = getattr(resp, "output_text", "") or "".join(text_buf)
                     response_id = getattr(resp, "id", response_id)
+                    _record_response_usage(resp)
 
                 elif etype in ("response.failed", "response.incomplete", "error"):
                     resp = getattr(event, "response", None)
                     err = getattr(resp, "error", None) or getattr(event, "error", None) \
                         or etype
-                    yield Event("error", self.name, {"error": str(err)})
+                    yield Event("error", self.name, {"error": _explain_error(err)})
                     return
         except Exception as e:  # noqa: BLE001
-            yield Event("error", self.name, {"error": str(e)})
+            yield Event("error", self.name, {"error": _explain_error(e)})
             return
 
         if not final_text:

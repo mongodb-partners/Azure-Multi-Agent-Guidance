@@ -1,4 +1,9 @@
 
+> **Historical planning doc.** This captures the original port plan. Some details have since
+> changed — notably the MongoDB MCP is now **self-hosted on Azure Container Apps** (not the managed
+> remote `https://mcp.mongodb.com`). For the current design see **[README.md](README.md)** and
+> **[docs/mcp-server.md](docs/mcp-server.md)**.
+
 ## Context
 
 The reference repo [`mongodb-partners/Multi-Agent-Architectural-Guidance-Bedrock-AgentCore`](https://github.com/mongodb-partners/Multi-Agent-Architectural-Guidance-Bedrock-AgentCore) is a config-driven multi-agent "Career Assistant" demo on AWS: a Bun/Hono API routes user questions to specialist agents built with the **Strands Agents SDK**, running on **Bedrock AgentCore Runtime**, using **Bedrock Claude** models, **Cognito** auth, and **MongoDB Atlas** for hybrid (vector + BM25) search, short/long-term memory, and facts. Four agents ship: `orchestrator`, `job-match`, `career-coach`, `company-intel`, plus a MongoDB MCP runtime.
@@ -124,7 +129,7 @@ EMBEDDING_MODEL=text-embedding-3-large         # 3072-dim
 EMBEDDING_DIMENSIONS=3072
 MONGODB_URI=mongodb+srv://...FabricCluster...   # user-supplied
 MONGODB_DB=multi-agent
-MONGODB_MCP_URL=https://mongo-mcp-without-auth11may.happyground-0d54aef3.eastus.azurecontainerapps.io/mcp
+MONGODB_MCP_URL=https://mcp.mongodb.com   # MongoDB Atlas Managed (Remote) MCP Server
 CLASSIFIER_BACKEND=auto
 ORCHESTRATOR_MODE=classifier          # classifier | maf-handoff (see orchestration decision)
 MONGODB_ALLOW_WRITE=false

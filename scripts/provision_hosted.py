@@ -27,8 +27,9 @@ logger = logging.getLogger("provision_hosted")
 
 # Runtime settings the hosted container needs. Only those present in the environment are passed.
 _ENV_PASSTHROUGH = [
+    "CAREER_AGENT",        # per-agent hosted mode: which agent src.agent_host serves
+                           # (NOT AGENT_NAME — Foundry reserves AGENT_*/FOUNDRY_* env vars)
     "SPECIALIST_MODE",
-    "ORCHESTRATOR_MODE",
     "CLASSIFIER_BACKEND",
     "AZURE_AI_PROJECT_ENDPOINT",
     "AZURE_AI_MODEL_DEPLOYMENT_NAME",
@@ -41,7 +42,10 @@ _ENV_PASSTHROUGH = [
     "EMBEDDING_FUNCTION_URL",
     "MONGODB_URI",
     "MONGODB_DB",
-    "MONGODB_MCP_URL",
+    "MONGODB_MCP_URL",             # self-hosted MongoDB MCP (Azure Container Apps) endpoint
+    "MCP_API_KEY",                 # static API-key value for the MCP endpoint header (optional)
+    "MCP_API_KEY_HEADER",          # header NAME the MCP validates (non-Authorization)
+    "AZURE_KEY_VAULT_URL",         # secrets store (Mongo URI, AOAI key, MCP API key)
     "MONGODB_ALLOW_WRITE",
     "HOSTED_STREAM_TRACE",
 ]

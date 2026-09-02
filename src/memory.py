@@ -4,10 +4,8 @@ Two layers, mirroring the reference's AgentCore Memory:
   - short-term : per-session chat turns in `chat_messages` (session-isolated, ordered).
   - long-term  : durable user facts in `agent_memory_facts`, extracted from turns by an LLM.
 
-For the default host-orchestrated (`classifier`) path we use plain **pymongo** (synchronous,
-simple to weave into the request flow). For the `maf-handoff` path, `build_maf_providers()`
-returns the async MAF `MongoDBHistoryProvider` / `MongoDBContextProvider` configured against
-the same collections, so MAF agents share the same memory store.
+The host orchestrator uses plain **pymongo** (synchronous, simple to weave into the request
+flow) so the Foundry-hosted specialists and the orchestrator share one memory store.
 """
 from __future__ import annotations
 
@@ -21,6 +19,7 @@ from .settings import get_settings
 
 CHAT_COLLECTION = "chat_messages"
 FACTS_COLLECTION = "agent_memory_facts"
+TRACES_COLLECTION = "agent_traces"
 MAX_HISTORY = 20
 
 _client: MongoClient | None = None
@@ -42,10 +41,14 @@ def _now() -> dt.datetime:
 # --------------------------------------------------------------------------- #
 # Short-term history
 # --------------------------------------------------------------------------- #
-def append_message(session_id: str, role: str, content: str, agent: str | None = None) -> None:
+def append_message(
+    session_id: str, role: str, content: str, agent: str | None = None,
+    user_id: str | None = None,
+) -> None:
     _db()[CHAT_COLLECTION].insert_one(
         {
             "session_id": session_id,
+            "user_id": user_id,
             "role": role,
             "content": content,
             "agent": agent,
@@ -70,15 +73,74 @@ def history_as_text(session_id: str, limit: int = MAX_HISTORY) -> str:
 
 
 def list_sessions() -> list[dict[str, Any]]:
+    """List sessions with turn counts, last-activity, and aggregate token/cost/latency from traces."""
     pipeline = [
-        {"$group": {"_id": "$session_id", "turns": {"$sum": 1}, "last": {"$max": "$ts"}}},
+        {"$group": {"_id": "$session_id", "messages": {"$sum": 1}, "last": {"$max": "$ts"},
+                    "first": {"$min": "$ts"}, "user_id": {"$last": "$user_id"}}},
         {"$sort": {"last": -1}},
-        {"$limit": 100},
+        {"$limit": 200},
     ]
-    return [
-        {"session_id": d["_id"], "turns": d["turns"], "last": d["last"].isoformat()}
-        for d in _db()[CHAT_COLLECTION].aggregate(pipeline)
-    ]
+    sessions = list(_db()[CHAT_COLLECTION].aggregate(pipeline))
+
+    # Aggregate trace stats per session (turns, tokens, cost, latency, tool calls).
+    trace_stats = {
+        d["_id"]: d
+        for d in _db()[TRACES_COLLECTION].aggregate([
+            {"$group": {
+                "_id": "$session_id",
+                "turns": {"$sum": 1},
+                "tokens": {"$sum": "$tokens.total"},
+                "cost_usd": {"$sum": "$cost_usd"},
+                "tool_calls": {"$sum": "$tool_call_count"},
+                "avg_latency_ms": {"$avg": "$latency_ms"},
+                "last_message": {"$last": "$user_message"},
+            }},
+        ])
+    }
+    out = []
+    for s in sessions:
+        sid = s["_id"]
+        ts = trace_stats.get(sid, {})
+        out.append({
+            "session_id": sid,
+            "user_id": s.get("user_id"),
+            "turns": ts.get("turns", 0) or (s.get("messages", 0) // 2),
+            "messages": s.get("messages", 0),
+            "last": s["last"].isoformat() if s.get("last") else None,
+            "first": s["first"].isoformat() if s.get("first") else None,
+            "tokens_total": int(ts.get("tokens", 0) or 0),
+            "cost_usd": round(ts.get("cost_usd", 0) or 0, 4),
+            "tool_calls": int(ts.get("tool_calls", 0) or 0),
+            "avg_latency_ms": round(ts.get("avg_latency_ms", 0) or 0, 1),
+            "last_message": ts.get("last_message", ""),
+        })
+    return out
+
+
+# --------------------------------------------------------------------------- #
+# Agent traces (per-turn, for the Sessions detail view)
+# --------------------------------------------------------------------------- #
+def save_trace(session_id: str, user_id: str, trace: dict[str, Any]) -> None:
+    """Persist one turn's full trace (events, reasoning, retrieval, tokens, cost, tools)."""
+    doc = {"session_id": session_id, "user_id": user_id, "ts": _now(), **trace}
+    _db()[TRACES_COLLECTION].insert_one(doc)
+
+
+def get_traces(session_id: str, limit: int = 100) -> list[dict[str, Any]]:
+    """Return all persisted turn traces for a session, oldest first (JSON-safe)."""
+    cur = (
+        _db()[TRACES_COLLECTION]
+        .find({"session_id": session_id}, {"_id": 0})
+        .sort("ts", ASCENDING)
+        .limit(limit)
+    )
+    out = []
+    for d in cur:
+        ts = d.get("ts")
+        if hasattr(ts, "isoformat"):
+            d["ts"] = ts.isoformat()
+        out.append(d)
+    return out
 
 
 # --------------------------------------------------------------------------- #
@@ -142,29 +204,4 @@ def ensure_indexes() -> None:
     """Create the supporting indexes for memory collections (idempotent)."""
     _db()[CHAT_COLLECTION].create_index([("session_id", ASCENDING), ("ts", ASCENDING)])
     _db()[FACTS_COLLECTION].create_index([("user_id", ASCENDING), ("fact", ASCENDING)], unique=True)
-
-
-# --------------------------------------------------------------------------- #
-# MAF providers (used by ORCHESTRATOR_MODE=maf-handoff)
-# --------------------------------------------------------------------------- #
-def build_maf_providers():
-    """Return (history_provider, context_provider) from agent-framework-mongodb.
-
-    Configured against the same URI/DB/collections as the pymongo path so both
-    orchestration modes share one memory store.
-    """
-    from agent_framework_mongodb import MongoDBContextProvider, MongoDBHistoryProvider
-
-    s = get_settings()
-    s.require("mongodb_uri")
-    history = MongoDBHistoryProvider(
-        mongo_uri=s.mongodb_uri,
-        database_name=s.mongodb_db,
-        collection_name=CHAT_COLLECTION,
-    )
-    context = MongoDBContextProvider(
-        mongo_uri=s.mongodb_uri,
-        database_name=s.mongodb_db,
-        collection_name=FACTS_COLLECTION,
-    )
-    return history, context
+    _db()[TRACES_COLLECTION].create_index([("session_id", ASCENDING), ("ts", ASCENDING)])

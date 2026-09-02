@@ -13,9 +13,44 @@ import os
 import requests
 import streamlit as st
 
+from theme import apply_mongodb_theme, section_title, sidebar_metric
+
 DEFAULT_API = os.getenv("API_URL", f"http://localhost:{os.getenv('PORT', '3000')}")
 
 st.set_page_config(page_title="Career Assistant — MongoDB × Azure Foundry", page_icon="💼", layout="wide")
+apply_mongodb_theme()
+
+
+def _fmt_int(n) -> str:
+    try:
+        return f"{int(n):,}"
+    except (TypeError, ValueError):
+        return "0"
+
+
+def fetch_usage_kpis(api_url: str) -> dict | None:
+    """Fetch the aggregate KPIs from the API /metrics endpoint (once per page load)."""
+    try:
+        return requests.get(f"{api_url}/metrics", timeout=8).json().get("kpis", {})
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def render_usage_metrics(api_url: str) -> None:
+    """MongoDB-styled 'Usage & Cost' section in the left navbar (updates on page refresh)."""
+    section_title("Usage &amp; Cost")
+    kpis = fetch_usage_kpis(api_url)
+    if kpis is None:
+        st.sidebar.caption("Metrics unavailable — check the API URL.")
+        return
+    latency_s = (kpis.get("avg_latency_ms", 0) or 0) / 1000.0
+    sidebar_metric("Total tokens consumed", _fmt_int(kpis.get("total_tokens", 0)))
+    sidebar_metric("Total cost (USD)", f"${kpis.get('total_cost_usd', 0):,.4f}")
+    sidebar_metric("Avg latency", f"{latency_s:.2f} s")
+    sidebar_metric("Avg tokens / request", f"{kpis.get('avg_tokens_per_request', 0):,.1f}")
+    sidebar_metric("Avg tool calls / request", f"{kpis.get('avg_tool_calls_per_request', 0):,.2f}")
+    sidebar_metric("Avg LLM calls / request", f"{kpis.get('avg_llm_calls_per_request', 0):,.2f}")
+    st.sidebar.caption("Values refresh when the page reloads.")
 
 
 # --------------------------------------------------------------------------- #
@@ -83,6 +118,25 @@ with st.sidebar:
         except Exception as e:  # noqa: BLE001
             st.error(f"Cannot reach API: {e}")
 
+# ---- Usage & Cost metrics (left navbar; refreshed on page load) ----
+render_usage_metrics(api_url)
+
+with st.sidebar:
+
+    # Telemetry / observability status
+    try:
+        h = requests.get(f"{api_url}/health", timeout=5).json()
+        if h.get("telemetry_enabled"):
+            st.success("📈 Telemetry: App Insights ON")
+        else:
+            st.info("📉 Telemetry: local metrics only\n\n(set APPLICATIONINSIGHTS_CONNECTION_STRING to export to Azure)")
+    except Exception:  # noqa: BLE001
+        pass
+    ai_url = os.getenv("APP_INSIGHTS_PORTAL_URL")
+    if ai_url:
+        st.markdown(f"[Open App Insights →]({ai_url})")
+    st.caption("See the **Metrics** page (sidebar) for the live dashboard.")
+
     with st.expander("Specialists"):
         try:
             ags = requests.get(f"{api_url}/agents", timeout=10).json().get("agents", [])
@@ -100,7 +154,7 @@ with st.sidebar:
 # Chat
 # --------------------------------------------------------------------------- #
 st.title("💼 Career Assistant")
-st.caption("MongoDB Atlas × Azure AI Foundry · Microsoft Agent Framework")
+st.caption("MongoDB Atlas × Azure AI Foundry Agent Service")
 
 if "messages" not in st.session_state:
     st.session_state.messages = []
@@ -119,11 +173,14 @@ if prompt := st.chat_input("Ask about jobs, career growth, or companies…"):
         answer_box = st.empty()
         events: list[tuple[str, dict]] = []
         final_text = ""
+        usage: dict = {}
         try:
             for etype, data in stream_chat(api_url, prompt, session_id, user_id):
                 if etype == "final":
                     final_text = data.get("text", "")
                     answer_box.markdown(final_text)
+                elif etype == "usage":
+                    usage = data
                 elif etype == "done":
                     break
                 else:
@@ -133,5 +190,15 @@ if prompt := st.chat_input("Ask about jobs, career growth, or companies…"):
         except Exception as e:  # noqa: BLE001
             final_text = f"⚠️ Error talking to the API: {e}"
             answer_box.error(final_text)
+
+        # Inline per-turn telemetry: latency + token usage.
+        if usage:
+            tok = usage.get("tokens", {}) or {}
+            latency = usage.get("latency_ms", 0)
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("Latency", f"{latency/1000:.2f}s")
+            c2.metric("Total tokens", tok.get("total", 0))
+            c3.metric("Prompt", tok.get("prompt", 0))
+            c4.metric("Completion", tok.get("completion", 0))
 
     st.session_state.messages.append({"role": "assistant", "content": final_text or "(no answer)"})

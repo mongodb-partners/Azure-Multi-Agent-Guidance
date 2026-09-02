@@ -7,15 +7,20 @@ It runs a **MongoDB-centric** "Career Assistant" scenario on the following stack
 
 | Component | This demo |
 |---|---|
-| Agent framework | **Microsoft Agent Framework (MAF)**, Python |
-| Agent runtime | **Azure AI Foundry Agent Service** (one agent per specialist) |
+| Agent runtime | **Azure AI Foundry Agent Service** — all four agents run as **separate hosted agents** (one managed-compute container each) |
+| Orchestration | The `orchestrator` hosted agent classifies and invokes the specialist hosted agents **by reference** (cross-agent), then synthesizes |
+| Grounding | **MongoDB-only** — every agent answers strictly from data retrieved via the MongoDB MCP server; no general-knowledge fallback |
 | Models | **Azure OpenAI / Foundry** deployments (`gpt-5.6-sol`, `text-embedding-3-large`) |
-| Tool gateway | Foundry **MCP tool** → MongoDB MCP on Container Apps |
-| Memory | **MongoDB** short-term (`chat_messages`) + long-term facts (`agent_memory_facts`) |
+| Tool gateway | Foundry **MCP tool** → **self-hosted `mongodb/mongodb-mcp-server`** on **Azure Container Apps** (Streamable HTTP `/mcp`, API-key header) |
+| Memory | **MongoDB** short-term (`chat_messages`) + long-term facts (`agent_memory_facts`) + per-turn agent traces (`agent_traces`) |
 | API | **FastAPI** + SSE |
+| UI | **Streamlit**, **MongoDB Design Language** theme — Chat + **Sessions** (per-turn agent traces) + **Metrics** dashboard, with a live Usage & Cost sidebar |
+| Observability | **Azure Monitor + OpenTelemetry** (traces/metrics), in-app `/metrics` + Streamlit dashboard + estimated USD cost |
+| Secrets | **Azure Key Vault** + user-assigned managed identity (no secrets in env/Bicep) |
+| Testing | Layered **pytest** — unit (offline) / integration / e2e / post-deploy smoke |
 | Infra-as-code | **Bicep** |
 
-Four specialists ship: `orchestrator`, `job-match`, `career-coach`, `company-intel`.
+Four agents ship: `orchestrator` (router) + three routable specialists `job-match`, `career-coach`, `company-intel`.
 
 ---
 
@@ -27,12 +32,21 @@ This demo assumes **you** have already provisioned:
 2. **Chat model deployment** — `gpt-5.6-sol` (used by all specialists + classifier/synthesizer/fact-extractor).
 3. **Embedding deployment** — `text-embedding-3-large` → **3072-dim** vectors.
 4. **MongoDB Atlas** — cluster `FabricCluster`, database `multi-agent`, on a tier that supports **Atlas Vector Search** (M10+ or Flex). Have the connection string ready.
-5. **MongoDB MCP server** — reuse the deployed Container App:
-   `https://mongo-mcp-without-auth11may.happyground-0d54aef3.eastus.azurecontainerapps.io/mcp`
-   (its connection string already targets `FabricCluster`; the db/collection are passed per query, so seeding into `multi-agent` is directly queryable — no redeploy needed).
-6. **Azure CLI** logged in (`az login`) with access to the tenant/subscription — used for `DefaultAzureCredential`.
+5. **Azure CLI** logged in (`az login`) with access to the tenant/subscription — used for `DefaultAzureCredential`.
 
-> Auth is intentionally **off** for v1 (local demo). See *Production hardening* below.
+> **MongoDB MCP server — self-hosted, nothing to pre-provision.** `deploy/deploy.sh` deploys the
+> official `mongodb/mongodb-mcp-server` image as an Azure Container App (`mcp.bicep`). Its container
+> holds the MongoDB connection string (from Key Vault), so the agents never handle DB credentials —
+> they call the MCP over Streamable HTTP at `<fqdn>/mcp` and (for external ingress) send a shared
+> **API-key header**. For **local dev**, run the MCP in Docker and point `MONGODB_MCP_URL` at it:
+> ```bash
+> docker run --rm -p 3000:3000 \
+>   -e MDB_MCP_CONNECTION_STRING="$MONGODB_URI" \
+>   -e MDB_MCP_TRANSPORT=http -e MDB_MCP_HTTP_HOST=0.0.0.0 -e MDB_MCP_HTTP_PORT=3000 \
+>   -e MDB_MCP_READ_ONLY=true \
+>   mongodb/mongodb-mcp-server:latest
+> # then set MONGODB_MCP_URL=http://localhost:3000/mcp in .env
+> ```
 
 ---
 
@@ -41,7 +55,7 @@ This demo assumes **you** have already provisioned:
 ```bash
 cd mongodb-multiagent-foundry
 python -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
+pip install -r requirements.txt -r requirements-foundry.txt
 
 cp .env.sample .env      # then fill in the blanks (project endpoint, Atlas URI, OpenAI key)
 az login                 # DefaultAzureCredential picks this up
@@ -49,42 +63,130 @@ az login                 # DefaultAzureCredential picks this up
 # 1) Seed Atlas + create vector/search indexes + generate embeddings
 python -m db_seeding.seed_all
 
-# 2) Create the 4 Foundry agents and smoke-test them
-python -m src.foundry_agents --smoke-test
+# 2) Register the specialists on the Foundry Agent Service (idempotent)
+python -m scripts.provision_agents verify   # confirm the resource accepts agent ops
+python -m scripts.provision_agents sync      # create/update the routable specialists
 
 # 3) Run the API (FastAPI + SSE) and the UI
 uvicorn src.app:app --reload --port ${PORT:-3000}
 streamlit run ui/streamlit_app.py     # in a second terminal
 ```
 
+> The app defaults to `SPECIALIST_MODE=registered-or-inline`: it invokes the registered
+> Foundry agents, falling back to inline Responses only if the Foundry stack/resource is
+> unavailable. See **[docs/foundry-agents.md](docs/foundry-agents.md)**.
+
 Open the Streamlit URL and try:
 > *"Find jobs matching my CV and tell me about those companies."*
 
 ---
 
-## How it works
+## Architecture
 
+```mermaid
+flowchart TB
+    subgraph Client
+        UI["Streamlit UI (MongoDB Design Language)<br/>Chat · Sessions (traces) · Metrics"]
+    end
+
+    subgraph API["FastAPI + SSE  (src/app.py)"]
+        CHAT["/chat  (SSE stream)"]
+        HEALTH["/health · /agents · /metrics<br/>/sessions · /sessions/{id}/traces"]
+        ORCH["orchestrator.run_turn<br/>classify → route → synthesize<br/>+ collect per-turn trace"]
+        CLS["classifier.py<br/>heuristic → LLM tie-break"]
+        RET["retrieval.py<br/>$vectorSearch + $search<br/>RRF · recency · MMR"]
+        LLM["llm.py<br/>classify / synthesize / fact-extract"]
+        MEM["memory.py<br/>short-term + long-term + traces"]
+        TEL["telemetry.py<br/>OTel spans + metrics + cost"]
+        CHAT --> ORCH
+        ORCH --> CLS
+        ORCH --> RET
+        ORCH --> LLM
+        ORCH --> MEM
+        ORCH -.-> TEL
+    end
+
+    subgraph Foundry["Azure AI Foundry Agent Service"]
+        SPEC["Specialist agents<br/>job-match · career-coach · company-intel"]
+        ORCHA["orchestrator (hosted, optional)"]
+    end
+
+    subgraph ACA["Azure Container Apps"]
+        MCP["Self-hosted MongoDB MCP<br/>mongodb/mongodb-mcp-server<br/>/mcp · API-key header · read-only"]
+    end
+
+    subgraph MongoDB["MongoDB Atlas"]
+        DATA[("Vector + full-text data<br/>chat_messages · agent_memory_facts · agent_traces")]
+    end
+
+    subgraph Azure["Azure platform"]
+        AOAI["Azure OpenAI<br/>gpt-5.6-sol · text-embedding-3-large"]
+        KV["Key Vault<br/>mongo-uri · aoai-key · mcp-api-key"]
+        AI["App Insights /<br/>Azure Monitor"]
+    end
+
+    UI -->|HTTP| CHAT
+    UI -->|GET| HEALTH
+    ORCH -->|invoke by reference| SPEC
+    SPEC -->|MCP tool + API key| MCP
+    MCP -->|preconfigured conn str| DATA
+    RET --> DATA
+    MEM --> DATA
+    LLM --> AOAI
+    RET --> AOAI
+    MCP -.->|mongo-uri secret| KV
+    TEL -.-> AI
+    ORCHA -->|cross-agent| SPEC
 ```
-User ── Streamlit UI ──HTTP──▶ FastAPI /chat (SSE)
-                                   │
-                                   ├─ classifier.py        select specialist(s)  (heuristic → LLM tie-break)
-                                   ├─ memory.py            load short-term history + long-term facts (Mongo)
-                                   ├─ orchestrator.py      ORCHESTRATOR_MODE:
-                                   │     • classifier  → invoke specialist(s) directly, synthesize if 2
-                                   │     • maf-handoff → MAF triage agent hands off dynamically
-                                   ├─ foundry_agents.py    each specialist = Foundry agent + MongoDB MCP tool + embed tool
-                                   ├─ retrieval.py         hybrid $vectorSearch + Atlas $search, RRF + recency + MMR
-                                   └─ persist turn + extract facts → Mongo
-```
 
-### Orchestration modes (`ORCHESTRATOR_MODE`)
-- **`classifier`** *(default)* — custom router. Deterministic and fast. When two specialists are selected, a synthesizer (`gpt-5.6-sol`) merges their answers.
-- **`maf-handoff`** — MAF's built-in handoff/group-chat orchestration; a triage agent delegates dynamically among the Foundry specialists. Showcases the framework.
+### Orchestration
+A custom classifier/router (`classifier.py`) selects the specialist(s) for each turn and invokes
+them on the Azure AI Foundry Agent Service. Deterministic and fast. Small talk / capability
+questions are answered directly by the orchestrator; substantive turns fan out to one or two
+specialists. When two specialists answer, a synthesizer (`gpt-5.6-sol`) merges their replies into
+one. Every agent answers **strictly from MongoDB** — a grounding contract injected by
+`config_loader.build_agent_instructions` forbids general-knowledge fallback.
 
-Build/verify `classifier` first, then flip the toggle to demo `maf-handoff`.
+### Specialist execution (`SPECIALIST_MODE`)
+- **`registered-or-inline`** *(default)* — invoke the registered Foundry prompt agents; fall back to inline Responses if the Foundry resource/SDK is unavailable.
+- **`registered`** — strict: only the registered Foundry agents (error if unavailable).
+- **`inline`** — always run inline via the raw Responses API (no Foundry registration).
+
+### Foundry consumption topologies
+The same pipeline can be consumed four ways off one source of truth (`config/agents/*.agent.md`) —
+see **[docs/foundry-agents.md](docs/foundry-agents.md)**:
+
+1. **Inline** — specialists run in-process inside the FastAPI app (the default fallback).
+2. **Prompt agents** — the 3 specialists are registered as Foundry prompt agents (`scripts.provision_agents sync`).
+3. **Whole-solution hosted agent** — the entire orchestrator runs as one managed-compute container (`deploy/provision_hosted.sh`).
+4. **Four separate hosted agents** — every agent (incl. `orchestrator`) is its own managed-compute container; the orchestrator invokes the specialist containers cross-agent by reference (`deploy/provision_agents_hosted.sh`).
 
 ### CV parsing (why text-only embeddings are enough)
 CV parsing is a **separate** extract-and-structure step (text extractor + `gpt-5.6-sol` pulls skills/experience). Matching then embeds the parsed **text** against job **text** via `text-embedding-3-large`. Multimodal (Voyage) would only be needed to embed *scanned/image* CVs directly — out of scope.
+
+---
+
+## UI (Streamlit)
+
+The Streamlit app (`streamlit run ui/streamlit_app.py`) is themed with the **MongoDB Design Language**
+(LeafyGreen palette, dark canvas; `ui/theme.py`). Three pages in the left navbar:
+
+1. **Career Assistant** — the chat, with a live **agent trace** (routing → tool calls → synthesis)
+   and a **Usage & Cost** sidebar (six KPIs — see [Observability](#observability)).
+2. **Sessions** (`ui/pages/2_Sessions.py`) — browse past conversations (turns, tokens, cost, last
+   activity). Click a session to open its per-turn **agent traces**, each with five tabs:
+   - **Reasoning flow** — the step-by-step routing/retrieval/tool/synthesis timeline
+   - **Tokens & cost** — prompt/completion/total tokens, estimated USD, LLM calls, latency
+   - **MCP tool calls** — each MongoDB Atlas MCP call (agent, tool, id)
+   - **Memory context** — long-term facts + short-term history + hybrid-retrieval grounding pulled from Atlas
+   - **Raw events (JSON)** — every SSE event exactly as streamed
+3. **Metrics** (`ui/pages/3_Metrics.py`) — the observability dashboard.
+
+Traces are collected per turn by the orchestrator and persisted to the MongoDB `agent_traces`
+collection; the Sessions page reads them via `GET /sessions` and `GET /sessions/{id}/traces`.
+
+> Only turns handled **after** this feature shipped have traces (older turns predate the
+> `agent_traces` collection). Traces have no TTL — prune them if the collection grows large.
 
 ---
 
@@ -95,7 +197,68 @@ cd deploy
 ./deploy.sh <resource-group> <location>   # e.g. ./deploy.sh mdb-maf-demo eastus
 ```
 
-Provisions ACR, a Container Apps environment, the embedding Azure Function, and the API + UI Container Apps, then emits endpoints to `.env.live`. The MongoDB MCP server is **reused** (not redeployed) by default.
+Provisions (via `main.bicep` + `keyvault.bicep` + `mcp.bicep` + `monitoring.bicep`): a Log Analytics
+workspace, Application Insights, a Container Apps environment, ACR, Key Vault + a user-assigned managed
+identity, the **self-hosted MongoDB MCP Container App**, the embedding Azure Function, the API + UI
+Container Apps, and the Azure Monitor alerts/workbook. `deploy.sh` generates the MCP API key, pushes
+secrets into Key Vault, builds/pushes images, deploys, then runs the post-deploy smoke test and writes
+endpoints to `.env.live`. The MongoDB Atlas cluster and the Foundry project/model deployments are
+**reused** (not redeployed).
+
+Optionally run the agents as Foundry hosted agents instead of inline —
+`./deploy/provision_hosted.sh <rg>` (whole solution in one container) or
+`./deploy/provision_agents_hosted.sh <rg>` (four separate containers). See
+**[docs/foundry-agents.md](docs/foundry-agents.md)**.
+
+---
+
+## Observability
+
+Traces and metrics flow to **Application Insights / Azure Monitor** via the Azure Monitor
+OpenTelemetry distro (`src/telemetry.py`). Spans cover `chat.turn` → classify → `specialist.<name>`
+→ synthesize, plus auto-instrumented FastAPI/httpx/pymongo. Custom metrics: `chat.turns`,
+`chat.errors`, `chat.latency_ms`, `specialist.invocations`, `tool.calls`, `llm.tokens`.
+
+`monitoring.bicep` provisions an Ops **workbook** and 7 alerts (API 5xx, p95 latency, container
+restarts, chat-error rate, token-budget, embedding-Function failures). Enable export by setting
+`APPLICATIONINSIGHTS_CONNECTION_STRING` (set automatically in the cloud stack); everything no-ops
+cleanly when it's unset.
+
+Even without App Insights, an always-on in-memory store powers `GET /metrics` and the Streamlit
+**Metrics** page (`ui/pages/3_Metrics.py`): turn count, p50/p95/avg latency, token totals,
+specialist/tool mix, and estimated USD cost. The chat page also shows a live **Usage & Cost**
+sidebar with six headline KPIs (updated on page refresh):
+
+1. Total tokens consumed
+2. Total cost (USD)
+3. Avg latency
+4. Avg tokens per request
+5. Avg tool calls per request
+6. Avg LLM calls per request
+
+Cost is estimated from token counts × configurable per-1M pricing (`PRICE_INPUT_PER_1M` /
+`PRICE_OUTPUT_PER_1M`, defaulting to gpt-4o list pricing).
+
+> Metrics are stored **in-process** per API replica/revision (they reset on restart and aren't
+> shared across replicas). App Insights is the durable, cross-replica view.
+
+---
+
+## Testing
+
+Layered `pytest` (config in `pytest.ini`, dev deps in `requirements-dev.txt`):
+
+```bash
+pip install -r requirements-dev.txt
+pytest                                   # default: unit only, offline, no credentials
+RUN_INTEGRATION=1 pytest -m integration  # real Mongo + Azure OpenAI
+RUN_E2E=1 API_URL=<url> pytest -m e2e     # SSE contract against a running API
+```
+
+- **unit** (`tests/unit/`) — offline, always run: classifier, orchestrator, retrieval math, memory, mcp_client, settings, telemetry.
+- **integration** (`tests/integration/`) — gated by `RUN_INTEGRATION=1` (hits live backends).
+- **e2e** (`tests/e2e/`) — gated by `RUN_E2E=1` + `API_URL` (SSE stream against a running API).
+- **smoke** (`smoke/post_deploy_smoke.py`) — run automatically by `deploy.sh`; checks `/health`, `/agents`, and a live `/chat` turn.
 
 ---
 
@@ -104,17 +267,99 @@ Provisions ACR, a Container Apps environment, the embedding Azure Function, and 
 ```
 config/agents/    orchestrator|job-match|career-coach|company-intel .agent.md
 config/skills/    SKILL.md per specialist
-src/              app.py, classifier.py, orchestrator.py, foundry_agents.py,
-                  memory.py, retrieval.py, embeddings.py, mcp_client.py, config_loader.py
+src/              app.py, orchestrator.py, classifier.py, foundry_agents.py, foundry_registry.py,
+                  hosted_agent.py, agent_host.py, memory.py, retrieval.py, embeddings.py,
+                  mcp_client.py, llm.py, telemetry.py, config_loader.py, settings.py
+scripts/          provision_agents.py, provision_hosted.py
 db_seeding/       seed_all.py + Atlas index definitions + sample data
 embedding-function/  Azure Function (POST /embed) — reused from mongodb-foundry-agent
-ui/               Streamlit chat + trace viewer
-deploy/           Bicep + deploy.sh
+ui/               streamlit_app.py (chat + Usage&Cost sidebar) · theme.py (MongoDB Design Language)
+                  pages/2_Sessions.py (sessions + agent traces) · pages/3_Metrics.py (dashboard)
+tests/            unit/ (offline) · integration/ · e2e/ · conftest.py    smoke/ post-deploy check
+deploy/           main.bicep, keyvault.bicep, mcp.bicep, monitoring.bicep, Dockerfile.*, deploy.sh,
+                  destroy.sh, provision_hosted.sh, provision_agents_hosted.sh
+docs/             foundry-agents.md, mcp-server.md, secrets.md, HARDENING-PLAN.md
 ```
 
 ---
 
-## Production hardening (out of scope for v1)
+## Cleanup
 
-Private Endpoint / VNET peering to Atlas · Entra ID JWT auth ·
-App Insights / Azure Monitor observability · Key Vault secret hardening · rate limiting.
+Tear down everything `deploy.sh` created:
+
+```bash
+cd deploy
+./destroy.sh <resource-group>            # interactive confirm; deletes the whole RG
+./destroy.sh <resource-group> --yes      # no prompt
+./destroy.sh <resource-group> --keep-rg  # delete only stack resources, keep the RG
+```
+
+The self-hosted **MongoDB MCP Container App is stack-owned** and is torn down with the rest.
+Preserved by default (prerequisites, not stack-owned): the **Foundry project/model deployments** and
+**MongoDB Atlas** data. Opt-in flags: `--purge-keyvault`, `--purge-foundry-agents`, `--drop-atlas`.
+See `deploy/destroy.sh --help` header for details.
+
+---
+
+## Secrets
+
+Secrets (Azure OpenAI key, Mongo URI, MCP API key) are stored in **Azure Key Vault** and read
+by the API + MCP + Function via a **user-assigned managed identity** (read-only `Key Vault Secrets
+User`) — no secret values land in container env or Bicep parameters. `deploy.sh` pushes the values
+from your local `.env` (and the generated MCP API key) into Key Vault. See
+**[docs/secrets.md](docs/secrets.md)** for the rotation runbook.
+
+> Keep `.env` / `.env.live` untracked (already in `.gitignore`); commit only `.env.sample`.
+
+---
+
+## Security
+
+Moving the MongoDB MCP server in-house (self-hosted on Azure Container Apps) changes the threat
+model. This is a **demo**, so several controls are intentionally relaxed — they're listed here as
+**known vulnerabilities** with the recommended production fix. Do not run this as-is in production.
+
+### Self-hosted MongoDB MCP
+
+| # | Vulnerability | Current state | Risk | Production fix |
+|---|---|---|---|---|
+| S1 | **MCP endpoint is internet-facing** | `mcp.bicep` uses `external: true` ingress so out-of-environment Foundry hosted agents can reach it | The `/mcp` endpoint is publicly routable | Use **internal ingress** + Private Endpoint/VNet when Foundry agents run in-VNet; or front it with a gateway/WAF and IP allow-list |
+| S2 | **Shared static API key (single factor)** | A single `MCP_API_KEY` header (`X-MCP-Api-Key`) gates all callers; `require_approval="never"` auto-approves tool calls | Key leak = full read access to the MCP; no per-caller identity, no rotation automation | Prefer **Entra ID / managed-identity** auth to the MCP; rotate the key regularly; scope keys per caller |
+| S3 | **API key composed into a Container App secret string** | `mcp.bicep` builds `MDB_MCP_HTTP_HEADERS` JSON inline from the `@secure()` param (Bicep `use-secure-value` warning) | Value is stored as a CA secret (not plaintext env), but the composed string isn't a first-class KV reference | Store the full headers JSON as its own **Key Vault** secret and reference it |
+| S4 | **MongoDB connection string in the MCP container** | The MCP holds `MDB_MCP_CONNECTION_STRING` (from KV) with cluster credentials | Container compromise exposes DB credentials | Use a **least-privilege, read-only** Atlas DB user scoped to `multi-agent`; rotate; Private Link to Atlas |
+| S5 | **No mTLS between agents and MCP** | Plain HTTPS + header key | A misconfigured egress could talk to a spoofed endpoint | Pin the MCP FQDN; consider mTLS / private networking |
+
+Mitigations already in place: the MCP runs **read-only** (`MDB_MCP_READ_ONLY=true`; write tools are
+never exposed unless `MONGODB_ALLOW_WRITE=true`), **server-side JS is disabled**
+(`MDB_MCP_DISABLE_SERVER_SIDE_JS=true`, blocks `$where`/`$function` injection), and connections are
+**session-scoped** (`MDB_MCP_CONNECTION_SCOPE=session`) so concurrent HTTP clients stay isolated.
+
+### Application (API / UI)
+
+| # | Vulnerability | Current state | Risk | Production fix |
+|---|---|---|---|---|
+| S6 | **No authn/authz on the API** | `POST /chat` and all endpoints are open | Anyone who reaches the API can drive the agents / read memory | Add **Entra ID JWT** auth (see HARDENING-PLAN) + per-user authorization |
+| S7 | **CORS `allow_origins=["*"]`** | `src/app.py` allows any origin | CSRF-style abuse from any site | Restrict to the UI origin(s) |
+| S8 | **API + UI have public ingress** | `main.bicep` `external: true` for both | Public attack surface | Internal ingress + gateway/Front Door with auth |
+| S9 | **Prompt-injection via retrieved/tool data** | Agents are grounded on MongoDB + MCP tool output | Malicious documents could steer the model | Treat tool/DB output as untrusted; keep `allowed_tools` allow-listing (already on); add output filtering |
+| S10 | **Secrets in local `.env`** | Real keys live in an untracked `.env` for local runs | On-disk credential exposure | Rotate anything shared; use Key Vault everywhere; never commit `.env` |
+
+### Platform / infra
+
+| # | Vulnerability | Current state | Production fix |
+|---|---|---|---|
+| S11 | **Key Vault public network access** | `keyvault.bicep` `publicNetworkAccess: 'Enabled'` | Switch to **Private Endpoint** + firewall |
+| S12 | **ACR admin user enabled** | `deploy.sh` creates ACR with `--admin-enabled true`; the API pulls with the admin password secret | Disable admin user; pull via **managed identity** (`AcrPull`) only |
+| S13 | **No rate limiting** | None on the API or MCP | Add rate limiting / quotas at the gateway |
+| S14 | **No egress restrictions** | Containers have open egress | Lock egress to Atlas + Azure OpenAI + MCP only |
+
+See **[docs/HARDENING-PLAN.md](docs/HARDENING-PLAN.md)** for the sequenced remediation plan.
+
+---
+
+## Production hardening
+
+Done: **Key Vault** secret hardening · **destroy** tooling · **App Insights / Azure Monitor**
+observability (traces, metrics, workbook, 7 alerts) · **layered testing** (unit/integration/e2e/smoke).
+Planned (see **[docs/HARDENING-PLAN.md](docs/HARDENING-PLAN.md)**): Private Endpoint / VNET to Atlas ·
+Entra ID JWT auth · rate limiting · CI/CD.

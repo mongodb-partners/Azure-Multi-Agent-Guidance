@@ -55,15 +55,28 @@ def _mcp_tool_object():
 
     Reusing `mcp_tool_dict()` guarantees registered prompt agents get a byte-identical MCP tool
     surface to the inline specialists — no second definition to drift.
+
+    The self-hosted MCP uses a STATIC API-key header with a NON-`Authorization` name, which the
+    Foundry runtime accepts on a stored MCP tool (unlike an `Authorization` header). And because the
+    key is long-lived, there is no expiring token to go stale in the registered version.
     """
     _, _, MCPTool = _require_sdk()
     d = mcp_tool_dict()
-    return MCPTool(
+    kwargs = dict(
         server_label=d["server_label"],
         server_url=d["server_url"],
         allowed_tools=d["allowed_tools"],
         require_approval=d["require_approval"],
     )
+    if d.get("headers"):
+        try:
+            return MCPTool(headers=d["headers"], **kwargs)
+        except TypeError:
+            logger.warning(
+                "MCPTool does not accept 'headers'; MCP API-key header not attached to the "
+                "registered agent. Upgrade azure-ai-projects or use inline mode."
+            )
+    return MCPTool(**kwargs)
 
 
 class FoundryAgentRegistry:
@@ -215,6 +228,10 @@ class FoundryAgentRegistry:
         Returns whatever `openai_client.responses.create(...)` returns — a stream iterator when
         `stream=True`, else a Response object. The caller maps events (the FoundrySpecialist
         registered path reuses the exact same dispatch as the inline path).
+
+        The self-hosted MCP tool uses a STATIC, long-lived API-key header baked into the stored
+        agent version, so — unlike the old expiring-OAuth-token setup — the registered path does not
+        go stale between turns. Rotate the key by re-provisioning (`scripts.provision_agents sync`).
         """
         oai = self.client().get_openai_client(agent_name=agent_name)
         kwargs: dict[str, Any] = {"input": input, "stream": stream}

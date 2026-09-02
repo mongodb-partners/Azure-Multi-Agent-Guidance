@@ -1,0 +1,26 @@
+# Per-agent Foundry HOSTED agent — serves ONE agent on Foundry-managed compute.
+# The same image is used for all four agents; CAREER_AGENT (build arg → env) selects which one
+# this container serves at runtime. NOTE: the var is CAREER_AGENT, not AGENT_NAME — Foundry
+# reserves the AGENT_* and FOUNDRY_* env prefixes for platform use and rejects containers that set
+# them. The Foundry runtime runs the container and routes Responses calls to it on port 8088.
+# Built + registered by deploy/provision_agents_hosted.sh.
+FROM python:3.11-slim
+
+WORKDIR /app
+ENV PYTHONUNBUFFERED=1 PIP_NO_CACHE_DIR=1
+
+# Core deps + the Foundry stack (Responses protocol server, azure-ai-projects for cross-agent calls).
+COPY requirements.txt requirements-foundry.txt ./
+RUN pip install -r requirements.txt -r requirements-foundry.txt
+
+COPY src/ ./src/
+COPY config/ ./config/
+
+# Which agent this container serves: job-match | career-coach | company-intel | orchestrator.
+# Overridden per-image at build time via `--build-arg CAREER_AGENT=<name>`.
+ARG CAREER_AGENT=orchestrator
+ENV CAREER_AGENT=${CAREER_AGENT} \
+    HOSTED_PORT=8088
+
+EXPOSE 8088
+CMD ["python", "-m", "src.agent_host"]

@@ -13,8 +13,10 @@ Commands:
     python -m scripts.provision_agents sync         # create/update all routable specialists
     python -m scripts.provision_agents sync --force # force a version bump for every agent
     python -m scripts.provision_agents list         # list registered agents + versions
+    python -m scripts.provision_agents delete-all   # delete the routable specialists + clear lock
 
-Requires: `pip install -r requirements-foundry.txt` and `az login` (DefaultAzureCredential).
+Requires: `pip install -r requirements-foundry.txt`, `az login` (DefaultAzureCredential), and the
+`Cognitive Services User` role on the Foundry account (grants the AIServices/agents data actions).
 """
 from __future__ import annotations
 
@@ -137,6 +139,47 @@ def cmd_list(_args) -> int:
     return 0
 
 
+def cmd_delete_all(args) -> int:
+    """Delete the routable specialists registered from config/agents/ and clear the lock file.
+
+    Only the config-defined routable specialists are deleted (job-match, career-coach,
+    company-intel) — NOT the hosted whole-solution agent or anything else in the project.
+    Pass --all-registered to instead delete every agent the project reports (destructive).
+    """
+    reg, FoundryUnavailable = _registry()
+
+    if args.all_registered:
+        try:
+            targets = list(reg.list_agents().keys())
+        except FoundryUnavailable as e:
+            print(f"✗ {e}")
+            return 1
+    else:
+        targets = [n for n, a in load_agents().items() if a.routable]
+
+    if not targets:
+        print("(nothing to delete)")
+        return 0
+
+    print(f"Deleting {len(targets)} agent(s): {', '.join(sorted(targets))}")
+    lock = _load_lock()
+    rc = 0
+    for name in targets:
+        try:
+            reg.delete_agent(name, force=True)
+            lock.pop(name, None)
+            print(f"  ✓ deleted {name}")
+        except FoundryUnavailable as e:
+            print(f"  ✗ {name}: {e}")
+            rc = 1
+        except Exception as e:  # noqa: BLE001 - not-found is fine on a re-run
+            print(f"  • {name}: {type(e).__name__}: {e} (skipped)")
+            lock.pop(name, None)
+    _save_lock(lock)
+    print(f"Lock updated: {_LOCK_PATH}")
+    return rc
+
+
 def main() -> int:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
     logging.getLogger("azure").setLevel(logging.WARNING)
@@ -146,9 +189,22 @@ def main() -> int:
     p_sync = sub.add_parser("sync", help="Create/update all routable specialists (idempotent).")
     p_sync.add_argument("--force", action="store_true", help="Bump a version even if unchanged.")
     sub.add_parser("list", help="List registered agents and their versions.")
+    p_del = sub.add_parser(
+        "delete-all", help="Delete the routable specialists and clear the lock file."
+    )
+    p_del.add_argument(
+        "--all-registered",
+        action="store_true",
+        help="Delete EVERY agent the project reports (incl. hosted), not just config specialists.",
+    )
 
     args = parser.parse_args()
-    return {"verify": cmd_verify, "sync": cmd_sync, "list": cmd_list}[args.command](args)
+    return {
+        "verify": cmd_verify,
+        "sync": cmd_sync,
+        "list": cmd_list,
+        "delete-all": cmd_delete_all,
+    }[args.command](args)
 
 
 if __name__ == "__main__":

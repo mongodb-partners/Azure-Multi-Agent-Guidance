@@ -1,5 +1,9 @@
-# Keep the ACR/Docker build context small. The hosted image only needs src/ + config/
-# + the two requirements files (see deploy/Dockerfile.hosted); everything below is dev-only.
+# Keep the ACR/Docker build context small. Note: ACR applies this SAME .dockerignore
+# to every image build, so we must NOT exclude paths that any Dockerfile needs to COPY:
+#   - Dockerfile.api    → src/ config/
+#   - Dockerfile.ui     → ui/
+#   - Dockerfile.hosted → src/ config/
+# Everything below is dev-only and safe to exclude from all three.
 .venv
 .venv-foundry
 .venv-maf
@@ -17,4 +21,3 @@ __pycache__
 notebooks
 tests
 docs
-ui

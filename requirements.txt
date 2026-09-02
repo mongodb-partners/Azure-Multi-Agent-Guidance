@@ -1,8 +1,8 @@
 # =============================================================================
-# Core runtime — everything the default demo needs (ORCHESTRATOR_MODE=classifier).
-# Specialists run on the Azure OpenAI *Responses API* (openai SDK) with hosted MongoDB
-# MCP, so the Foundry Agents SDK and Microsoft Agent Framework are NOT required here.
-# For the optional `maf-handoff` orchestration toggle, also: pip install -r requirements-maf.txt
+# Core runtime — everything the demo needs.
+# Specialists are hosted on the Azure AI Foundry Agent Service; to register/host them
+# also install the Foundry stack:  pip install -r requirements-foundry.txt
+# (Without it the app still runs by falling back to inline Responses; see foundry-agents.md.)
 # =============================================================================
 
 # --- Azure auth (keyless fallback via DefaultAzureCredential) ---
@@ -25,3 +25,10 @@ pymongo>=4.7.0
 # --- UI ---
 streamlit>=1.35.0
 requests>=2.31.0
+
+# --- Observability (Azure Monitor + OpenTelemetry) ---
+# No-op at runtime unless APPLICATIONINSIGHTS_CONNECTION_STRING is set.
+azure-monitor-opentelemetry>=1.6.0
+opentelemetry-instrumentation-fastapi>=0.48b0
+opentelemetry-instrumentation-httpx>=0.48b0
+opentelemetry-instrumentation-pymongo>=0.48b0

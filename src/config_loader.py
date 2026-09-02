@@ -98,11 +98,57 @@ def load_skills(config_dir: str | None = None) -> dict[str, SkillConfig]:
     return skills
 
 
+# Non-negotiable grounding contract injected into EVERY agent's instructions. Enforces that
+# answers come only from data retrieved via the MongoDB MCP server — no general/pretrained
+# knowledge fallback. Kept here (single source) so it can never drift or be forgotten per file.
+# The self-hosted MongoDB MCP server has a PRECONFIGURED connection (its container holds the
+# connection string), so agents query directly — no `connect` handshake is needed. `{db_hint}` names
+# the target database so tool calls include the right `database` arg.
+GROUNDING_RULES = """\
+---
+
+## STRICT GROUNDING — MongoDB-only (highest priority; overrides everything else)
+
+You may ONLY answer using data you retrieve from MongoDB through the MongoDB MCP tools
+(e.g. `find`, `aggregate`, `count`) — or grounding rows the host explicitly provides in the
+prompt (they originate from the same MongoDB).
+{db_hint}
+Hard rules:
+1. Before answering any substantive question, you MUST query MongoDB via the MCP tools.
+2. Base every fact, name, number, and claim strictly on the returned documents. Do NOT use
+   your own general/pretrained knowledge to add, infer, or "fill in" anything.
+3. If the MCP query returns NO documents (or the tool errors / returns empty), you MUST NOT
+   answer from general knowledge. Reply exactly with:
+   "I couldn't find any relevant information in the MongoDB database for that request."
+   Optionally suggest how to broaden the query (e.g. relax a filter). Nothing else.
+4. Never fabricate, guess, or approximate data that is not present in the retrieved documents.
+5. If only partial data is found, answer only from what was returned and explicitly note what
+   is unknown/missing — do not backfill from general knowledge.
+"""
+
+# Database hint injected into GROUNDING_RULES. The self-hosted MCP server already holds the
+# connection, so agents only need to know which database/collection to target per tool call.
+_DB_HINT = """
+The MongoDB MCP server is already connected to the cluster (no `connect` step needed). Pass
+`database` = "{database}" and the target `collection` to every data tool call
+(`find`, `aggregate`, `count`, `list-collections`, `collection-schema`).
+"""
+
+
 def build_agent_instructions(agent: AgentConfig, skills: dict[str, SkillConfig]) -> str:
-    """Compose the final Foundry instructions = agent body + linked skill playbook."""
+    """Compose final instructions = agent body + linked skill playbook + strict grounding rules.
+
+    The grounding block is appended LAST so it takes precedence and applies uniformly to every
+    agent (specialists and the orchestrator alike).
+    """
+    s = get_settings()
+    db_hint = _DB_HINT.format(database=s.mongodb_db)
+    grounding = GROUNDING_RULES.format(db_hint=db_hint)
+
     parts = [agent.instructions]
     if agent.skill and agent.skill in skills:
         parts.append("\n\n---\n\n## Playbook\n\n" + skills[agent.skill].body)
+    parts.append("\n\n" + grounding)
     return "\n".join(parts).strip()
 
 

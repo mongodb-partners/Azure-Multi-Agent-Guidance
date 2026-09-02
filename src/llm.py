@@ -2,7 +2,7 @@
 
 These three "utility LLM" calls (routing tie-break, multi-answer synthesis, fact extraction)
 are small, synchronous, and deployment-based — so we use the `openai` AzureOpenAI client
-directly rather than a full MAF agent. Auth prefers an API key when provided, else falls back
+directly rather than a full agent. Auth prefers an API key when provided, else falls back
 to DefaultAzureCredential (az login) via a bearer-token provider.
 
 The specialist *agents* themselves run on Foundry Agent Service (see foundry_agents.py); this
@@ -100,6 +100,7 @@ def chat(
                 )
                 kwargs.setdefault("reasoning_effort", "low")
                 continue
+            _record_usage(getattr(resp, "usage", None))
             return choice.message
         except BadRequestError as e:
             param = _unsupported_param(e)
@@ -118,13 +119,47 @@ def chat(
     return resp.choices[0].message
 
 
+def _record_usage(usage: Any) -> None:
+    """Emit token usage to telemetry (OTel metric) + the in-memory metrics store."""
+    try:
+        from . import telemetry
+
+        telemetry.record_llm_call()  # one utility LLM invocation happened
+        if not usage:
+            return
+        prompt = int(getattr(usage, "prompt_tokens", 0) or 0)
+        completion = int(getattr(usage, "completion_tokens", 0) or 0)
+        total = int(getattr(usage, "total_tokens", 0) or (prompt + completion))
+        telemetry.record_tokens(prompt, kind="prompt")
+        telemetry.record_tokens(completion, kind="completion")
+        telemetry.note_tokens(prompt=prompt, completion=completion, total=total)
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def _unsupported_param(err: Any) -> str | None:
-    """Extract the offending parameter name from an OpenAI 400 error, if present."""
+    """Extract the offending parameter name from an OpenAI 400 error, if present.
+
+    Prefers the structured `param` field. Some Azure OpenAI models (e.g. gpt-4o)
+    return `param: null` with a message like "Unrecognized request argument
+    supplied: reasoning_effort", so we also parse the parameter name out of the
+    message text as a fallback.
+    """
     body = getattr(err, "body", None)
     if isinstance(body, dict):
         p = body.get("param") or (body.get("error") or {}).get("param")
         if p:
             return str(p)
+
+    import re
+
+    msg = str(getattr(err, "message", "") or err)
+    m = re.search(r"[Uu]nrecognized request argument supplied:\s*([A-Za-z0-9_]+)", msg)
+    if m:
+        return m.group(1)
+    m = re.search(r"[Uu]nknown parameter:\s*'?([A-Za-z0-9_]+)'?", msg)
+    if m:
+        return m.group(1)
     return None
 
 

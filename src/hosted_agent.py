@@ -28,8 +28,10 @@ from typing import Any, AsyncIterator
 # Self-contained by default: the whole-solution agent runs specialists inline unless told otherwise.
 os.environ.setdefault("SPECIALIST_MODE", "inline")
 # Silence the agent-server's OpenTelemetry Azure-IMDS resource probe when running off-Azure
-# (it spams connection errors to 169.254.169.254). Override with OTEL_SDK_DISABLED=false in prod.
-os.environ.setdefault("OTEL_SDK_DISABLED", "true")
+# (it spams connection errors to 169.254.169.254). But when App Insights is configured we WANT
+# telemetry, so only disable OTel when there's no connection string (i.e. local/offline runs).
+if not os.getenv("APPLICATIONINSIGHTS_CONNECTION_STRING"):
+    os.environ.setdefault("OTEL_SDK_DISABLED", "true")
 
 from .orchestrator import run_turn  # noqa: E402  (after env default so settings pick it up)
 

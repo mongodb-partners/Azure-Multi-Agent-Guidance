@@ -17,7 +17,7 @@ from pydantic import BaseModel
 from sse_starlette.sse import EventSourceResponse
 from starlette.concurrency import iterate_in_threadpool
 
-from . import memory
+from . import memory, telemetry
 from .config_loader import load_agents
 from .orchestrator import run_turn
 from .settings import get_settings
@@ -26,6 +26,9 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 logger = logging.getLogger(__name__)
 
 app = FastAPI(title="MongoDB × Azure Foundry — Multi-Agent Career Assistant", version="1.0.0")
+
+# Configure Azure Monitor / OpenTelemetry (no-op if no connection string is set).
+telemetry.configure_telemetry(app)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],  # demo/no-auth; tighten for production
@@ -53,13 +56,22 @@ def health() -> dict:
     s = get_settings()
     return {
         "status": "ok",
-        "orchestrator_mode": s.orchestrator_mode,
+        "specialist_mode": s.specialist_mode,
         "classifier_backend": s.classifier_backend,
         "chat_deployment": s.chat_deployment,
         "embedding_model": s.embedding_model,
         "mongodb_db": s.mongodb_db,
         "mcp_url": s.mongodb_mcp_url,
+        "mcp_configured": bool(s.mongodb_mcp_url),
+        "mcp_api_key_configured": bool(s.mcp_api_key),
+        "telemetry_enabled": telemetry.is_enabled(),
     }
+
+
+@app.get("/metrics")
+def metrics() -> dict:
+    """Aggregate in-process metrics for the UI dashboard (turns, latency, tokens)."""
+    return telemetry.snapshot()
 
 
 @app.get("/agents")
@@ -82,6 +94,12 @@ def agents() -> dict:
 @app.get("/sessions")
 def sessions() -> dict:
     return {"sessions": memory.list_sessions()}
+
+
+@app.get("/sessions/{session_id}/traces")
+def session_traces(session_id: str) -> dict:
+    """Full per-turn agent traces for one session (reasoning, tools, retrieval, tokens, raw events)."""
+    return {"session_id": session_id, "traces": memory.get_traces(session_id)}
 
 
 @app.post("/chat")
