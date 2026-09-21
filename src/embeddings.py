@@ -27,7 +27,13 @@ logger = logging.getLogger(__name__)
 # target, when EMBEDDING_PROVIDER=atlas_auto (specs/002 R3).
 AUTO_EMBED_TEXT_FIELD = "embed_text"
 
-_VOYAGE_URL = "https://api.voyageai.com/v1/embeddings"
+def _voyage_url() -> str:
+    """Embeddings endpoint from the configurable base (VOYAGE_API_BASE, R2).
+
+    Voyage-platform keys (pa-*) hit api.voyageai.com; Atlas-issued keys (al-*) are
+    rejected there with 403 and must use https://ai.mongodb.com/v1 instead.
+    """
+    return f"{get_settings().voyage_api_base.rstrip('/')}/embeddings"
 
 
 def embedding_provider() -> str:
@@ -65,7 +71,7 @@ def _embed_via_aoai(text: str) -> list[float]:
 def _voyage_request(payload: dict, api_key: str) -> dict:
     """HTTP boundary for the Voyage embeddings API (kept tiny for offline mocking — R8)."""
     req = urllib.request.Request(
-        _VOYAGE_URL,
+        _voyage_url(),
         data=json.dumps(payload).encode("utf-8"),
         headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
     )

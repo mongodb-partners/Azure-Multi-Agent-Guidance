@@ -140,7 +140,7 @@ Embedding" documentation, 2026-09-18):
 
 | # | Question | Resolution |
 |---|----------|-----------|
-| Q2 | Scope of option 1 | **Direct Voyage API** (`https://api.voyageai.com/v1/embeddings`) with a user-supplied `VOYAGE_API_KEY`. |
+| Q2 | Scope of option 1 | **Direct Voyage API** (`https://api.voyageai.com/v1/embeddings`) with a user-supplied `VOYAGE_API_KEY`. **Amended (2026-09-21):** the API base is configurable via `VOYAGE_API_BASE` (default `https://api.voyageai.com/v1`) because Atlas-issued keys (`al-*`) are rejected by api.voyageai.com (403) and must use `https://ai.mongodb.com/v1`. |
 | Q3 | Embedding Function under `voyage` | **Option B: direct API-only — and extended: the Function is removed for the `foundry` provider too.** Key custody stays solved via Key Vault secret references on the API container. |
 | Q6 | Relevance floor shape | **Per-provider default map** (`foundry: 0.60`; `voyage`/`atlas_auto`: uncalibrated → floor disabled + warning) with `RETRIEVAL_MIN_SCORE` as explicit override. |
 

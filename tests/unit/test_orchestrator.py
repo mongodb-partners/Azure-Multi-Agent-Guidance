@@ -94,8 +94,12 @@ def test_run_turn_direct_reply_when_no_specialist(monkeypatch):
         scores = {}
 
     monkeypatch.setattr(orch, "classify", lambda _m: C())
-    # Direct reply now streams token chunks; stub the streaming helper.
-    monkeypatch.setattr(orch, "_direct_reply_stream", lambda *a, **k: iter(["hi ", "there"]))
+    # Direct reply streams (kind, text) chunks; stub the streaming helper (specs/004 R1).
+    monkeypatch.setattr(
+        orch,
+        "_direct_reply_stream",
+        lambda *a, **k: iter([("reasoning", "thinking… "), ("delta", "hi "), ("delta", "there")]),
+    )
 
     events = list(orch.run_turn("s", "u", "hello"))
     types = [e["type"] for e in events]
@@ -107,6 +111,38 @@ def test_run_turn_direct_reply_when_no_specialist(monkeypatch):
     final = [e for e in events if e["type"] == "final"][0]
     assert final["text"] == "hi there"
     assert final["streamed"] is True
+
+
+def test_run_turn_direct_reply_streams_reasoning(monkeypatch):
+    """specs/004 R1/R7: the direct path forwards reasoning chunks as `reasoning` events
+    (agent="orchestrator") and the trace accumulates them into `reasoning_text`."""
+    _stub_memory(monkeypatch)
+
+    class C:
+        backend = "heuristic:direct"
+        specialists = []
+        scores = {}
+
+    monkeypatch.setattr(orch, "classify", lambda _m: C())
+    monkeypatch.setattr(
+        orch,
+        "_direct_reply_stream",
+        lambda *a, **k: iter([("reasoning", "let me "), ("reasoning", "think"),
+                              ("delta", "hi")]),
+    )
+    monkeypatch.setattr(orch, "_direct_reply", lambda *a, **k: "hi")
+
+    captured: dict = {}
+    monkeypatch.setattr(
+        orch, "_save_trace",
+        lambda _s, _u, trace, _r: captured.update(reasoning_text=trace.reasoning_text),
+    )
+
+    events = list(orch.run_turn("s", "u", "hello"))
+    reasoning = [e for e in events if e["type"] == "reasoning"]
+    assert reasoning and all(e["agent"] == "orchestrator" for e in reasoning)
+    assert "".join(e["text"] for e in reasoning) == "let me think"
+    assert captured["reasoning_text"] == "let me think"
 
 
 def test_run_turn_direct_reply_falls_back_when_stream_fails(monkeypatch):

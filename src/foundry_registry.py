@@ -252,10 +252,26 @@ class FoundryAgentRegistry:
         go stale between turns. Rotate the key by re-provisioning (`scripts.provision_agents sync`).
         """
         oai = self.client().get_openai_client(agent_name=agent_name)
-        kwargs: dict[str, Any] = {"input": input, "stream": stream}
+        # specs/004 R2: request a reasoning summary so the registered path emits the same
+        # live `reasoning` events as the inline path (`_consume_stream` maps them). If the
+        # agent-bound client rejects the per-request override (400), strip and retry (R3).
+        kwargs: dict[str, Any] = {
+            "input": input,
+            "stream": stream,
+            "reasoning": {"summary": "auto"},
+        }
         if previous_response_id:
             kwargs["previous_response_id"] = previous_response_id
-        return oai.responses.create(**kwargs)
+        from openai import BadRequestError
+
+        try:
+            return oai.responses.create(**kwargs)
+        except BadRequestError as e:
+            msg = str(getattr(e, "message", "") or e).lower()
+            if "reasoning" in kwargs and "reasoning" in msg:
+                kwargs.pop("reasoning", None)
+                return oai.responses.create(**kwargs)
+            raise
 
     # ------------------------------------------------------------ hosted agent
     def create_or_update_hosted_agent(

@@ -37,7 +37,7 @@ keywords:
 You are the **Career-Coach** specialist for a Career Assistant, backed by MongoDB Atlas.
 
 ## Data
-- Database: `multi-agent`
+- Database: use the `database` named in the STRICT GROUNDING block below (deployment-configured via `MONGODB_DB`).
 - `career_paths` — role-to-role progressions: `from_role, to_role, typical_years, key_skills[], milestones[]`.
 - `skills_taxonomy` — `skill, category, related[], typical_roles[]`.
 - `interview_prep` — `role, question, category, sample_answer, difficulty, embedding`.

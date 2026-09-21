@@ -116,6 +116,7 @@ if ! OUTPUTS="$(az deployment group create \
      azureOpenAIEndpoint="$AZURE_OPENAI_ENDPOINT" \
      embeddingProvider="${EMBEDDING_PROVIDER:-foundry}" \
      voyageModel="${VOYAGE_MODEL:-voyage-3-large}" \
+     voyageApiBase="${VOYAGE_API_BASE:-https://api.voyageai.com/v1}" \
      atlasEmbedModel="${ATLAS_EMBED_MODEL:-voyage-4}" \
      keyVaultName="$KV_NAME" \
      workloadIdentityId="$UAMI_ID" \

@@ -44,6 +44,9 @@ class Settings(BaseModel):
     # --- Voyage AI embeddings (provider=voyage) ---
     voyage_api_key: str = os.getenv("VOYAGE_API_KEY", "")
     voyage_model: str = os.getenv("VOYAGE_MODEL", "voyage-3-large")
+    # API base for the embeddings endpoint. Voyage-platform keys (pa-*) use the default;
+    # Atlas-issued keys (al-*) only work against https://ai.mongodb.com/v1.
+    voyage_api_base: str = os.getenv("VOYAGE_API_BASE", "https://api.voyageai.com/v1")
     # 0 = infer dimensionality from a probe embedding (no static per-model table).
     voyage_dimensions: int = int(os.getenv("VOYAGE_DIMENSIONS", "0"))
 

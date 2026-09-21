@@ -17,7 +17,7 @@ from typing import Any, Iterator
 from . import memory, telemetry
 from .classifier import classify
 from .foundry_agents import get_registry
-from .llm import chat_text, chat_text_stream
+from .llm import chat_text, chat_text_stream_events
 from .retrieval import PRESETS, hybrid_search
 
 logger = logging.getLogger(__name__)
@@ -224,9 +224,11 @@ def _direct_reply(message: str, history: str, facts: str) -> str:
     )
 
 
-def _direct_reply_stream(message: str, history: str, facts: str) -> Iterator[str]:
-    """Streaming variant: yield the direct reply chunk-by-chunk for live rendering."""
-    yield from chat_text_stream(
+def _direct_reply_stream(message: str, history: str, facts: str) -> Iterator[tuple[str, str]]:
+    """Streaming variant: yield ``(kind, text)`` chunks for live rendering (specs/004 R1).
+
+    ``kind`` is ``"reasoning"`` (live reasoning summary) or ``"delta"`` (answer text)."""
+    yield from chat_text_stream_events(
         _direct_reply_messages(message, history, facts),
         temperature=0.4,
         max_tokens=1200,
@@ -383,8 +385,13 @@ def _run_turn(
         yield _event("direct")
         parts: list[str] = []
         try:
-            for piece in _direct_reply_stream(message, history, facts):
-                if piece:
+            for kind, piece in _direct_reply_stream(message, history, facts):
+                if not piece:
+                    continue
+                if kind == "reasoning":
+                    # Live reasoning summary chunk (specs/004 R1) — forward like specialists.
+                    yield _event("reasoning", agent="orchestrator", text=piece)
+                else:
                     parts.append(piece)
                     yield _event("delta", agent="orchestrator", text=piece)
         except Exception as e:  # noqa: BLE001 — fall back to a single non-streamed reply

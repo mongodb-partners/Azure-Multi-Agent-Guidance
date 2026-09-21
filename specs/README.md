@@ -43,3 +43,4 @@ specs/<NNN>-<slug>/
 | 001 | [Foundry-managed short-term memory](001-foundry-short-term-memory/spec.md) | implemented |
 | 002 | [Configurable embedding provider](002-configurable-embedding-provider/spec.md) | implemented |
 | 003 | [Self-contained Azure provisioning](003-self-contained-azure-provisioning/spec.md) | abandoned |
+| 004 | [Live reasoning streaming — direct replies and registered/inline parity](004-live-reasoning-streaming/spec.md) | implemented |

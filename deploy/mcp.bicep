@@ -86,6 +86,9 @@ resource mcpApp 'Microsoft.App/containerApps@2024-03-01' = {
             { name: 'MDB_MCP_TRANSPORT', value: 'http' }
             { name: 'MDB_MCP_HTTP_HOST', value: '0.0.0.0' }
             { name: 'MDB_MCP_HTTP_PORT', value: '3000' }
+            // Newer mongodb-mcp-server images refuse non-loopback HTTP binding without this
+            // opt-in. Container Apps ingress + MDB_MCP_HTTP_HEADERS provide the access control.
+            { name: 'MDB_MCP_DANGEROUS_HOST_BINDING', value: 'true' }
             // Safety: read-only + no server-side JS.
             { name: 'MDB_MCP_READ_ONLY', value: string(readOnly) }
             { name: 'MDB_MCP_DISABLE_SERVER_SIDE_JS', value: 'true' }

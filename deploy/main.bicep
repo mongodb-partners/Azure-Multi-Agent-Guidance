@@ -41,6 +41,9 @@ param embeddingDimensions int = 3072
 @description('Voyage model name (provider=voyage)')
 param voyageModel string = 'voyage-3-large'
 
+@description('Voyage embeddings API base (provider=voyage). Atlas-issued keys (al-*) need https://ai.mongodb.com/v1')
+param voyageApiBase string = 'https://api.voyageai.com/v1'
+
 @description('Atlas Automated Embedding model (provider=atlas_auto)')
 param atlasEmbedModel string = 'voyage-4'
 
@@ -222,6 +225,7 @@ resource apiApp 'Microsoft.App/containerApps@2024-03-01' = {
             { name: 'EMBEDDING_MODEL', value: embeddingModel }
             { name: 'EMBEDDING_DIMENSIONS', value: string(embeddingDimensions) }
             { name: 'VOYAGE_MODEL', value: voyageModel }
+            { name: 'VOYAGE_API_BASE', value: voyageApiBase }
             { name: 'ATLAS_EMBED_MODEL', value: atlasEmbedModel }
             { name: 'MONGODB_URI', secretRef: 'mongo-uri' }
             { name: 'MONGODB_DB', value: mongoDb }

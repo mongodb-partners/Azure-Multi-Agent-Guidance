@@ -120,15 +120,20 @@ def chat(
 
 
 def _record_usage(usage: Any) -> None:
-    """Emit token usage to telemetry (OTel metric) + the in-memory metrics store."""
+    """Emit token usage to telemetry (OTel metric) + the in-memory metrics store.
+
+    Accepts both chat.completions usage (`prompt_tokens`/`completion_tokens`) and
+    Responses usage (`input_tokens`/`output_tokens`)."""
     try:
         from . import telemetry
 
         telemetry.record_llm_call()  # one utility LLM invocation happened
         if not usage:
             return
-        prompt = int(getattr(usage, "prompt_tokens", 0) or 0)
-        completion = int(getattr(usage, "completion_tokens", 0) or 0)
+        prompt = int(getattr(usage, "prompt_tokens", 0) or getattr(usage, "input_tokens", 0) or 0)
+        completion = int(
+            getattr(usage, "completion_tokens", 0) or getattr(usage, "output_tokens", 0) or 0
+        )
         total = int(getattr(usage, "total_tokens", 0) or (prompt + completion))
         telemetry.record_tokens(prompt, kind="prompt")
         telemetry.record_tokens(completion, kind="completion")
@@ -169,7 +174,46 @@ def chat_text(messages: list[dict[str, str]], **kwargs: Any) -> str:
     return (msg.content or "").strip()
 
 
-def chat_text_stream(
+@lru_cache(maxsize=1)
+def _responses_client():
+    """OpenAI client wired to the Azure OpenAI `/openai/v1` route (Responses-capable).
+
+    Mirrors `foundry_agents._responses_client` (kept separate to avoid a module-level
+    dependency from the low-level LLM helper onto the specialist stack).
+    """
+    s = get_settings()
+    base = s.aoai_base or (s.project_endpoint.rstrip("/"))
+    if not base:
+        raise RuntimeError(
+            "No Azure OpenAI endpoint configured. Set AZURE_OPENAI_ENDPOINT (or "
+            "AZURE_AI_PROJECT_ENDPOINT)."
+        )
+    if s.aoai_api_key:
+        from openai import OpenAI
+
+        return OpenAI(base_url=f"{base}/openai/v1", api_key=s.aoai_api_key)
+    from azure.identity import DefaultAzureCredential, get_bearer_token_provider
+    from openai import AzureOpenAI
+
+    provider = get_bearer_token_provider(
+        DefaultAzureCredential(), "https://cognitiveservices.azure.com/.default"
+    )
+    return AzureOpenAI(
+        azure_endpoint=base,
+        azure_ad_token_provider=provider,
+        api_version="2025-03-01-preview",
+    )
+
+
+# Responses stream event types that carry live reasoning chunks (summary and/or raw).
+_REASONING_DELTA_TYPES = (
+    "response.reasoning_summary_text.delta",
+    "response.reasoning_text.delta",
+    "response.reasoning.delta",
+)
+
+
+def chat_text_stream_events(
     messages: list[dict[str, str]],
     *,
     temperature: float = 0.2,
@@ -177,54 +221,60 @@ def chat_text_stream(
     deployment: str | None = None,
     reasoning_effort: str | None = "low",
 ) -> Any:
-    """Stream the assistant text content chunk-by-chunk (yields str deltas).
+    """Stream one Responses-API turn, yielding ``(kind, text)`` chunks (specs/004 R1).
 
-    Mirrors `chat`'s parameter-compatibility handling: reasoning-class deployments reject
-    `max_tokens`/non-default `temperature`, so rejected params are stripped and the call is
-    retried. Token usage is recorded from the final chunk when the deployment includes it
-    (`stream_options={"include_usage": True}`).
+    ``kind`` is ``"reasoning"`` for live reasoning-summary chunks and ``"delta"`` for
+    answer text. Chat-style ``messages`` are accepted verbatim as the Responses ``input``.
+
+    Reasoning-class deployments get ``reasoning={"effort": ..., "summary": "auto"}`` so
+    the UI can show live "thinking" (R5: low effort keeps small talk cheap). Deployments
+    that reject any parameter (400) are retried with it stripped — same optimistic
+    pattern as `chat` (R3). Usage is recorded at ``response.completed``.
     """
     s = get_settings()
     kwargs: dict[str, Any] = {
         "model": deployment or s.classifier_deployment,
-        "messages": messages,
+        "input": messages,
         "temperature": temperature,
-        "max_completion_tokens": max_tokens,
+        "max_output_tokens": max_tokens,
         "stream": True,
-        "stream_options": {"include_usage": True},
     }
     if reasoning_effort:
-        kwargs["reasoning_effort"] = reasoning_effort
+        kwargs["reasoning"] = {"effort": reasoning_effort, "summary": "auto"}
+    else:
+        kwargs["reasoning"] = {"summary": "auto"}
 
     from openai import BadRequestError
 
     for _ in range(5):
         try:
-            stream = _chat_client().chat.completions.create(**kwargs)
-            usage = None
-            for chunk in stream:
-                if getattr(chunk, "usage", None):
-                    usage = chunk.usage
-                choices = getattr(chunk, "choices", None) or []
-                if not choices:
-                    continue
-                delta = getattr(choices[0], "delta", None)
-                piece = getattr(delta, "content", None) if delta else None
-                if piece:
-                    yield piece
-            _record_usage(usage)
+            stream = _responses_client().responses.create(**kwargs)
+            for event in stream:
+                etype = getattr(event, "type", "") or ""
+                if etype in _REASONING_DELTA_TYPES:
+                    piece = getattr(event, "delta", "") or ""
+                    if piece:
+                        yield ("reasoning", piece)
+                elif etype == "response.output_text.delta":
+                    piece = getattr(event, "delta", "") or ""
+                    if piece:
+                        yield ("delta", piece)
+                elif etype == "response.completed":
+                    _record_usage(getattr(getattr(event, "response", None), "usage", None))
             return
         except BadRequestError as e:
             param = _unsupported_param(e)
             if param and param in kwargs:
                 kwargs.pop(param, None)
                 continue
-            if param == "temperature" or "temperature" in str(e):
-                if kwargs.get("temperature") not in (None, 1):
-                    kwargs["temperature"] = 1
-                    continue
-            if "stream_options" in str(e):
-                kwargs.pop("stream_options", None)
+            msg = str(getattr(e, "message", "") or e).lower()
+            if "reasoning" in kwargs and "reasoning" in msg:
+                kwargs.pop("reasoning", None)  # deployment doesn't support reasoning (R3)
+                continue
+            if (param == "temperature" or "temperature" in str(e)) and kwargs.get(
+                "temperature"
+            ) not in (None, 1):
+                kwargs["temperature"] = 1
                 continue
             raise
 
