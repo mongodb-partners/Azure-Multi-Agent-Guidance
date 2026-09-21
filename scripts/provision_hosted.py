@@ -37,9 +37,14 @@ _ENV_PASSTHROUGH = [
     "AZURE_OPENAI_ENDPOINT",
     "AZURE_OPENAI_API_KEY",
     "AZURE_OPENAI_API_VERSION",
+    "EMBEDDING_PROVIDER",          # specs/002: foundry | voyage | atlas_auto
     "EMBEDDING_MODEL",
     "EMBEDDING_DIMENSIONS",
-    "EMBEDDING_FUNCTION_URL",
+    "VOYAGE_API_KEY",
+    "VOYAGE_MODEL",
+    "VOYAGE_DIMENSIONS",
+    "ATLAS_EMBED_MODEL",
+    "SHORT_TERM_MEMORY_BACKEND",   # specs/001: mongo | foundry
     "MONGODB_URI",
     "MONGODB_DB",
     "MONGODB_MCP_URL",             # self-hosted MongoDB MCP (Azure Container Apps) endpoint

@@ -13,9 +13,11 @@ Execution is controlled by `SPECIALIST_MODE`:
   - registered — strict: only the registered Foundry agent (error if unavailable).
   - inline / disabled — always run inline via the raw Responses API (no Foundry registration).
 
-`stream_query` yields structured `Event`s (status / tool_call / message / error) so the
-FastAPI layer can relay them over SSE and the UI can render a trace. The event interface is
-identical across modes, so the orchestrator and UI need no changes.
+`stream_query` yields structured `Event`s (status / reasoning / delta / tool_call / message /
+error) so the FastAPI layer can relay them over SSE and the UI can render a trace *and* the
+answer live. `reasoning` and `delta` events carry incremental reasoning/answer token chunks as
+they arrive; `message` still carries the full accumulated answer at completion. The event
+interface is identical across modes, so the orchestrator and UI need no changes.
 """
 from __future__ import annotations
 
@@ -71,7 +73,7 @@ def _responses_client():
 
 @dataclass
 class Event:
-    type: str            # "status" | "tool_call" | "message" | "error"
+    type: str            # "status" | "reasoning" | "delta" | "tool_call" | "message" | "error"
     agent: str
     data: dict[str, Any]
 
@@ -182,16 +184,53 @@ class FoundrySpecialist:
             "input": query,
             "tools": [mcp_tool_dict()],
             "stream": True,
+            # Ask reasoning-class models (gpt-5.x / o-series) to stream a reasoning summary so the
+            # UI can show live "thinking". Non-reasoning models (e.g. gpt-4o) reject this param —
+            # it is stripped and retried transparently below.
+            "reasoning": {"summary": "auto"},
         }
         if previous_response_id:
             kwargs["previous_response_id"] = previous_response_id
 
-        try:
-            stream = self.client.responses.create(**kwargs)
-        except Exception as e:  # noqa: BLE001
-            yield Event("error", self.name, {"error": str(e)})
+        stream = self._create_stream_with_fallback(kwargs)
+        if stream is None:
+            # _create_stream_with_fallback yielded an error Event already? No — it returns None
+            # only on unrecoverable error, which we surface here.
+            yield Event("error", self.name, {"error": self._last_stream_error or "stream failed"})
             return
         yield from self._consume_stream(stream)
+
+    _last_stream_error: str | None = None
+
+    def _create_stream_with_fallback(self, kwargs: dict[str, Any]) -> Any:
+        """Open a Responses stream, transparently dropping params the deployment rejects.
+
+        Reasoning-class models accept ``reasoning={"summary": "auto"}``; classic models (gpt-4o)
+        return a 400 for it. Rather than branch on model name (which is brittle across gpt-4o /
+        gpt-5.x / o-series), we optimistically request the summary and strip it on rejection.
+        """
+        from openai import BadRequestError
+
+        self._last_stream_error = None
+        for _ in range(3):
+            try:
+                return self.client.responses.create(**kwargs)
+            except BadRequestError as e:
+                msg = str(getattr(e, "message", "") or e)
+                if "reasoning" in kwargs and "reasoning" in msg.lower():
+                    kwargs.pop("reasoning", None)  # model doesn't support reasoning summaries
+                    continue
+                self._last_stream_error = _explain_error(e)
+                return None
+            except Exception as e:  # noqa: BLE001
+                self._last_stream_error = _explain_error(e)
+                return None
+        # Exhausted retries.
+        try:
+            return self.client.responses.create(**kwargs)
+        except Exception as e:  # noqa: BLE001
+            self._last_stream_error = _explain_error(e)
+            return None
 
     def _stream_query_registered(
         self, query: str, previous_response_id: str | None = None
@@ -224,7 +263,14 @@ class FoundrySpecialist:
         yield from self._consume_stream(stream)
 
     def _consume_stream(self, stream: Any) -> Iterator[Event]:
-        """Shared Responses-stream → Event mapping used by both the inline and registered paths."""
+        """Shared Responses-stream → Event mapping used by both the inline and registered paths.
+
+        Answer text and model reasoning are forwarded *live* as they arrive:
+          - ``response.output_text.delta``        → ``delta``     Event (answer token chunk)
+          - ``response.reasoning*.delta``         → ``reasoning`` Event (reasoning token chunk)
+        The accumulated text is still emitted as a final ``message`` Event at completion so the
+        orchestrator has the full answer for persistence / synthesis.
+        """
         seen_calls: set[str] = set()
         text_buf: list[str] = []
         final_text = ""
@@ -252,7 +298,20 @@ class FoundrySpecialist:
 
                 elif etype == "response.output_text.delta":
                     delta = getattr(event, "delta", "") or ""
-                    text_buf.append(delta)
+                    if delta:
+                        text_buf.append(delta)
+                        yield Event("delta", self.name, {"text": delta})
+
+                # Reasoning-class models (gpt-5.x) stream a reasoning summary and/or raw
+                # reasoning as separate delta events; forward whichever the deployment emits.
+                elif etype in (
+                    "response.reasoning_summary_text.delta",
+                    "response.reasoning_text.delta",
+                    "response.reasoning.delta",
+                ):
+                    delta = getattr(event, "delta", "") or ""
+                    if delta:
+                        yield Event("reasoning", self.name, {"text": delta})
 
                 elif etype == "response.completed":
                     resp = getattr(event, "response", None)

@@ -4,11 +4,12 @@ This project uses these long-lived secrets:
 
 | Secret | Env var | Where it's used |
 |---|---|---|
-| Azure OpenAI API key | `AZURE_OPENAI_API_KEY` | `src/llm.py`, `src/embeddings.py`, embedding Function |
+| Azure OpenAI API key | `AZURE_OPENAI_API_KEY` | `src/llm.py`, `src/embeddings.py` (provider=foundry) |
+| Voyage AI API key (only when `EMBEDDING_PROVIDER=voyage`) | `VOYAGE_API_KEY` | `src/embeddings.py` — Key Vault secret `voyage-api-key` |
 | MongoDB Atlas connection string (contains DB password) | `MONGODB_URI` | `src/memory.py`, `src/retrieval.py`, seeding |
 | Self-hosted MCP API key | `MCP_API_KEY` | `src/mcp_client.py` (API-key header to the MCP endpoint); the MCP container validates it via `MDB_MCP_HTTP_HEADERS` |
 
-Optional/derived: `EMBEDDING_FUNCTION_URL`, `MONGODB_MCP_URL` are endpoints, not secrets. The MCP
+Optional/derived: `MONGODB_MCP_URL` is an endpoint, not a secret. The MCP
 API key is a **static, long-lived** value (no token to refresh) — `deploy.sh` generates it and stores
 it in Key Vault (`mcp-api-key`). See **[docs/mcp-server.md](mcp-server.md)**.
 
@@ -20,7 +21,7 @@ it in Key Vault (`mcp-api-key`). See **[docs/mcp-server.md](mcp-server.md)**.
   They are **not** committed to git history — verified with
   `git ls-files | grep .env` (only `.env.sample`, which is placeholder-only).
 - In the deployed stack they are stored in **Azure Key Vault** (`deploy/keyvault.bicep`) and read
-  by the API Container App + embedding Function via a **user-assigned managed identity** — no
+  by the API Container App via a **user-assigned managed identity** — no
   secret values transit Bicep parameters or land in container env. `deploy.sh` pushes the values
   from your local `.env` into Key Vault (see "Key Vault model" below).
 
@@ -103,7 +104,7 @@ Implemented in `deploy/keyvault.bicep` + `deploy/main.bicep`:
 
 - Vault: `<prefix>-kv-<hash>` with RBAC authorization and 7-day soft-delete.
 - Secrets: `azure-openai-api-key`, `mongodb-uri`, `mcp-api-key`.
-- The API + MCP Container Apps + embedding Function use a **user-assigned managed identity**
+- The API + MCP Container Apps use a **user-assigned managed identity**
   (`<prefix>-id`) granted **`Key Vault Secrets User`** (read-only — least privilege; the previous
   read/write grant existed only for the removed Atlas MCP token broker). A user-assigned identity is
   used deliberately: it can be created and granted the role *before* the apps exist, avoiding the

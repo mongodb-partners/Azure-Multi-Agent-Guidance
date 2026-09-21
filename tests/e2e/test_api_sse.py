@@ -48,3 +48,30 @@ def test_chat_sse_contract(api_url):
                 saw_final = True
     assert saw_final, f"no final event; saw {seen_types}"
     assert "done" in seen_types
+
+
+def test_chat_sse_streams_answer_deltas(api_url):
+    """The answer must stream live: `delta` events must arrive *before* the `final` event."""
+    payload = {"message": "Tell me about growing from engineer to staff engineer.",
+               "session_id": "e2e-stream", "user_id": "e2e"}
+    order: list[str] = []
+    streamed = ""
+    final_text = ""
+    with httpx.stream("POST", f"{api_url}/chat", json=payload, timeout=180) as r:
+        r.raise_for_status()
+        current_event = None
+        for line in r.iter_lines():
+            if line.startswith("event:"):
+                current_event = line.split(":", 1)[1].strip()
+                order.append(current_event)
+            elif line.startswith("data:"):
+                if current_event == "delta":
+                    streamed += json.loads(line.split(":", 1)[1].strip()).get("text", "")
+                elif current_event == "final":
+                    final_text = json.loads(line.split(":", 1)[1].strip()).get("text", "")
+
+    assert "delta" in order, f"no delta events streamed; saw {order}"
+    # At least one delta must precede the final event (proves live streaming, not buffering).
+    assert order.index("delta") < order.index("final")
+    assert streamed.strip(), "no streamed answer text accumulated from deltas"
+    assert final_text.strip(), "no final answer text"

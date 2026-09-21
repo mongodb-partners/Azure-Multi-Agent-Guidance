@@ -56,11 +56,17 @@ def _mcp_tool_object():
     Reusing `mcp_tool_dict()` guarantees registered prompt agents get a byte-identical MCP tool
     surface to the inline specialists — no second definition to drift.
 
-    The self-hosted MCP uses a STATIC API-key header with a NON-`Authorization` name, which the
-    Foundry runtime accepts on a stored MCP tool (unlike an `Authorization` header). And because the
-    key is long-lived, there is no expiring token to go stale in the registered version.
+    Auth handling differs from the inline path because Foundry REJECTS raw auth headers on a
+    *registered* MCP tool ("Headers that can include sensitive information are not allowed in the
+    headers property for MCP tools. Use project_connection_id instead."). So:
+      - If `MCP_CONNECTION_ID` is set, the API-key header is stored in a Foundry project
+        connection (CustomKeys) and referenced via `project_connection_id` (the correct,
+        Foundry-approved way to carry the secret).
+      - Else, if the MCP needs no auth (empty key), we register a plain header-less tool.
+      - Else we raise, because sending the header inline would be rejected by the service.
     """
     _, _, MCPTool = _require_sdk()
+    s = get_settings()
     d = mcp_tool_dict()
     kwargs = dict(
         server_label=d["server_label"],
@@ -68,14 +74,26 @@ def _mcp_tool_object():
         allowed_tools=d["allowed_tools"],
         require_approval=d["require_approval"],
     )
-    if d.get("headers"):
+
+    conn = s.mcp_connection_id
+    if conn:
+        # Reference the stored connection; do NOT attach raw headers (service rejects them).
         try:
-            return MCPTool(headers=d["headers"], **kwargs)
-        except TypeError:
-            logger.warning(
-                "MCPTool does not accept 'headers'; MCP API-key header not attached to the "
-                "registered agent. Upgrade azure-ai-projects or use inline mode."
-            )
+            return MCPTool(project_connection_id=conn, **kwargs)
+        except TypeError as e:  # SDK too old to accept project_connection_id
+            raise FoundryUnavailable(
+                "Installed azure-ai-projects MCPTool does not support project_connection_id "
+                f"({e}); upgrade the SDK to register an authenticated MCP tool."
+            ) from e
+
+    if d.get("headers"):
+        raise FoundryUnavailable(
+            "The MCP server requires an API-key header, but Foundry does not allow raw headers on "
+            "registered MCP tools. Create a Foundry project connection holding the header and set "
+            "MCP_CONNECTION_ID to its name/id (see scripts/provision_agents)."
+        )
+
+    # No auth required — register a plain tool.
     return MCPTool(**kwargs)
 
 

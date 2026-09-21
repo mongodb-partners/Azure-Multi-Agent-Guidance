@@ -17,6 +17,8 @@ from pydantic import BaseModel
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 load_dotenv(_PROJECT_ROOT / ".env")
 
+_RETRIEVAL_MIN_SCORE_ENV = os.getenv("RETRIEVAL_MIN_SCORE", "")
+
 
 class Settings(BaseModel):
     # --- Foundry / Agent Service ---
@@ -25,13 +27,29 @@ class Settings(BaseModel):
     chat_deployment: str = os.getenv("AZURE_AI_MODEL_DEPLOYMENT_NAME", "gpt-5.6-sol")
     classifier_deployment: str = os.getenv("CLASSIFIER_MODEL_DEPLOYMENT", "gpt-5.6-sol")
 
-    # --- Azure OpenAI embeddings ---
+    # --- Embeddings (provider-selected — specs/002, R1) ---
+    # foundry (default) — direct Azure OpenAI embeddings (deployment = EMBEDDING_MODEL)
+    # voyage            — direct Voyage AI API (VOYAGE_API_KEY + VOYAGE_MODEL)
+    # atlas_auto        — Atlas Automated Embedding (Voyage, Atlas-managed): no
+    #                     client-side embedding at seed or query time.
+    embedding_provider: str = os.getenv("EMBEDDING_PROVIDER", "foundry")
+
+    # --- Azure OpenAI embeddings (provider=foundry) ---
     aoai_endpoint: str = os.getenv("AZURE_OPENAI_ENDPOINT", "")
     aoai_api_key: str = os.getenv("AZURE_OPENAI_API_KEY", "")
     aoai_api_version: str = os.getenv("AZURE_OPENAI_API_VERSION", "2024-06-01")
     embedding_model: str = os.getenv("EMBEDDING_MODEL", "text-embedding-3-large")
     embedding_dimensions: int = int(os.getenv("EMBEDDING_DIMENSIONS", "3072"))
-    embedding_function_url: str = os.getenv("EMBEDDING_FUNCTION_URL", "")
+
+    # --- Voyage AI embeddings (provider=voyage) ---
+    voyage_api_key: str = os.getenv("VOYAGE_API_KEY", "")
+    voyage_model: str = os.getenv("VOYAGE_MODEL", "voyage-3-large")
+    # 0 = infer dimensionality from a probe embedding (no static per-model table).
+    voyage_dimensions: int = int(os.getenv("VOYAGE_DIMENSIONS", "0"))
+
+    # --- Atlas Automated Embedding (provider=atlas_auto) ---
+    # Voyage model the autoEmbed index declares (Atlas-managed, multi-tenant).
+    atlas_embed_model: str = os.getenv("ATLAS_EMBED_MODEL", "voyage-4")
 
     # --- MongoDB Atlas ---
     mongodb_uri: str = os.getenv("MONGODB_URI", "")
@@ -53,6 +71,14 @@ class Settings(BaseModel):
     mcp_api_key: str = os.getenv("MCP_API_KEY", "")
     mcp_api_key_header: str = os.getenv("MCP_API_KEY_HEADER", "X-MCP-Api-Key")
 
+    # --- Foundry project connection for the MCP tool (registered agents) ---
+    # Foundry rejects raw auth headers on a *registered* MCP tool ("Headers that can include
+    # sensitive information are not allowed … Use project_connection_id instead"). So the MCP
+    # API-key header is stored in a Foundry project connection (CustomKeys) and the registered
+    # MCPTool references it by name/id. Only used on the registered path; the inline path still
+    # sends the header directly. Set to the connection NAME (e.g. "mongodb-mcp") or full ARM id.
+    mcp_connection_id: str = os.getenv("MCP_CONNECTION_ID", "")
+
     # --- Azure Key Vault (secrets store) ---
     # Holds the deployed stack's secrets (Mongo URI, AOAI key, MCP API key). Empty for local runs.
     azure_key_vault_url: str = os.getenv("AZURE_KEY_VAULT_URL", "")
@@ -67,6 +93,13 @@ class Settings(BaseModel):
     # OAuth token), so the registered path no longer suffers the ~1h-token 424 problem. The header
     # name is non-`Authorization` (Foundry rejects `Authorization` on registered MCP tools).
     specialist_mode: str = os.getenv("SPECIALIST_MODE", "registered-or-inline")
+    # Short-term (session) memory backend — specs/001 (R3):
+    #   mongo (default) — per-session turns in the Atlas `chat_messages` collection
+    #   foundry         — Foundry Conversations (managed); requires the optional Foundry
+    #                     stack (requirements-foundry.txt) and AZURE_AI_PROJECT_ENDPOINT.
+    #                     Mapping session_id -> conversation_id lives in `chat_sessions`.
+    # Long-term facts and traces stay in Atlas regardless.
+    short_term_memory_backend: str = os.getenv("SHORT_TERM_MEMORY_BACKEND", "mongo")
     allow_write: bool = os.getenv("MONGODB_ALLOW_WRITE", "false").lower() == "true"
     port: int = int(os.getenv("PORT", "3000"))
 
@@ -83,6 +116,20 @@ class Settings(BaseModel):
     # OpenAI gpt-4o list pricing ($2.50 in / $10.00 out per 1M tokens); override for your model.
     price_input_per_1m: float = float(os.getenv("PRICE_INPUT_PER_1M", "2.50"))
     price_output_per_1m: float = float(os.getenv("PRICE_OUTPUT_PER_1M", "10.00"))
+
+    # --- Retrieval grounding (specs/002, R7) ---
+    # Minimum Atlas vectorSearchScore for a host-retrieved row to be offered as a grounding
+    # candidate. Below this the block is emitted empty, so the agent abstains instead of
+    # grounding on noise. Atlas normalises cosine to (1+cos)/2 — 0.5 is orthogonal, so anything
+    # under ~0.6 filters nothing. This is an OPTIONAL OVERRIDE: unset → the per-provider
+    # default map in src/retrieval.py::FLOOR_DEFAULTS applies (foundry: 0.60, calibrated
+    # against the seeded demo corpus — window: 0.579 best off-corpus `jobs` to 0.611 worst
+    # on-corpus `interview_prep`; voyage/atlas_auto: uncalibrated → floor disabled with a
+    # warning). Recalibrate per provider/corpus with
+    # `python -m scripts.calibrate_retrieval_floor`, and go per-preset if the window closes.
+    retrieval_min_score: float | None = (
+        float(_RETRIEVAL_MIN_SCORE_ENV) if _RETRIEVAL_MIN_SCORE_ENV else None
+    )
 
     # --- Paths ---
     config_dir: str = str(_PROJECT_ROOT / "config")

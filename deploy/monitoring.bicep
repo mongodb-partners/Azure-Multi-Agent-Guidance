@@ -4,8 +4,9 @@
 // Provisions:
 //   * An Action Group (email/webhook) for alert notifications.
 //   * A workspace/App-Insights backed Workbook with the key operational tiles.
-//   * Metric + log-query alerts on latency, errors, restarts, token spend, and
-//     Function failures.
+//   * Metric + log-query alerts on latency, errors, restarts, and token spend.
+//     (The embedding Function App was removed in specs/002 — embeddings are called
+//     directly by the API app.)
 //
 // Called from main.bicep with the App Insights + Log Analytics resource IDs.
 // =============================================================================
@@ -18,9 +19,6 @@ param prefix string = 'mdbmaf'
 
 @description('App Insights component resource ID')
 param appInsightsId string
-
-@description('Log Analytics workspace resource ID (alert query scope)')
-param logAnalyticsId string
 
 @description('API Container App resource ID (for restart/replica alerts)')
 param apiAppId string
@@ -167,34 +165,6 @@ resource alertTokenBudget 'Microsoft.Insights/scheduledQueryRules@2023-03-15-pre
           metricMeasureColumn: 'total'
           operator: 'GreaterThan'
           threshold: tokenBudgetPerHour
-          failingPeriods: { numberOfEvaluationPeriods: 1, minFailingPeriodsToAlert: 1 }
-        }
-      ]
-    }
-    actions: { actionGroups: [ actionGroup.id ] }
-  }
-}
-
-// ---------------------------------------------------------------------------
-// 6. Embedding Function failures (log query over the workspace)
-// ---------------------------------------------------------------------------
-resource alertFunctionFailures 'Microsoft.Insights/scheduledQueryRules@2023-03-15-preview' = {
-  name: '${prefix}-alert-func-failures'
-  location: location
-  properties: {
-    severity: 2
-    enabled: true
-    scopes: [ logAnalyticsId ]
-    evaluationFrequency: 'PT5M'
-    windowSize: 'PT15M'
-    criteria: {
-      allOf: [
-        {
-          query: 'FunctionAppLogs | where Level == "Error" | summarize c = count()'
-          timeAggregation: 'Total'
-          metricMeasureColumn: 'c'
-          operator: 'GreaterThan'
-          threshold: 5
           failingPeriods: { numberOfEvaluationPeriods: 1, minFailingPeriodsToAlert: 1 }
         }
       ]

@@ -169,6 +169,66 @@ def chat_text(messages: list[dict[str, str]], **kwargs: Any) -> str:
     return (msg.content or "").strip()
 
 
+def chat_text_stream(
+    messages: list[dict[str, str]],
+    *,
+    temperature: float = 0.2,
+    max_tokens: int = 2000,
+    deployment: str | None = None,
+    reasoning_effort: str | None = "low",
+) -> Any:
+    """Stream the assistant text content chunk-by-chunk (yields str deltas).
+
+    Mirrors `chat`'s parameter-compatibility handling: reasoning-class deployments reject
+    `max_tokens`/non-default `temperature`, so rejected params are stripped and the call is
+    retried. Token usage is recorded from the final chunk when the deployment includes it
+    (`stream_options={"include_usage": True}`).
+    """
+    s = get_settings()
+    kwargs: dict[str, Any] = {
+        "model": deployment or s.classifier_deployment,
+        "messages": messages,
+        "temperature": temperature,
+        "max_completion_tokens": max_tokens,
+        "stream": True,
+        "stream_options": {"include_usage": True},
+    }
+    if reasoning_effort:
+        kwargs["reasoning_effort"] = reasoning_effort
+
+    from openai import BadRequestError
+
+    for _ in range(5):
+        try:
+            stream = _chat_client().chat.completions.create(**kwargs)
+            usage = None
+            for chunk in stream:
+                if getattr(chunk, "usage", None):
+                    usage = chunk.usage
+                choices = getattr(chunk, "choices", None) or []
+                if not choices:
+                    continue
+                delta = getattr(choices[0], "delta", None)
+                piece = getattr(delta, "content", None) if delta else None
+                if piece:
+                    yield piece
+            _record_usage(usage)
+            return
+        except BadRequestError as e:
+            param = _unsupported_param(e)
+            if param and param in kwargs:
+                kwargs.pop(param, None)
+                continue
+            if param == "temperature" or "temperature" in str(e):
+                if kwargs.get("temperature") not in (None, 1):
+                    kwargs["temperature"] = 1
+                    continue
+            if "stream_options" in str(e):
+                kwargs.pop("stream_options", None)
+                continue
+            raise
+
+
 def chat_json(messages: list[dict[str, str]], **kwargs: Any) -> dict[str, Any]:
     """Ask for and parse a JSON object response (best-effort)."""
     txt = chat_text(messages, **kwargs)

@@ -1,1 +1,17 @@
-{}
+{
+  "career-coach": {
+    "hash": "6bef05a1e5881a3b53c35a55d3af454b9eae3e2eef77f69c09699abd0f83095d",
+    "updated": "2026-09-03T14:34:21+00:00",
+    "version": "1"
+  },
+  "company-intel": {
+    "hash": "4ec7b357a143511ca4785a985a1ca3934963f4b11347c3de8288d09ac844611d",
+    "updated": "2026-09-03T14:34:24+00:00",
+    "version": "1"
+  },
+  "job-match": {
+    "hash": "02468e7dc384d1b345563ba324d06cd5788974491832345858de65e19b0a0d0f",
+    "updated": "2026-09-03T14:34:28+00:00",
+    "version": "1"
+  }
+}

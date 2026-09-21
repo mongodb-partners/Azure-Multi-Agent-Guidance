@@ -10,7 +10,7 @@ It runs a **MongoDB-centric** "Career Assistant" scenario on the following stack
 | Agent runtime | **Azure AI Foundry Agent Service** — all four agents run as **separate hosted agents** (one managed-compute container each) |
 | Orchestration | The `orchestrator` hosted agent classifies and invokes the specialist hosted agents **by reference** (cross-agent), then synthesizes |
 | Grounding | **MongoDB-only** — every agent answers strictly from data retrieved via the MongoDB MCP server; no general-knowledge fallback |
-| Models | **Azure OpenAI / Foundry** deployments (`gpt-5.6-sol`, `text-embedding-3-large`) |
+| Models | **Azure OpenAI / Foundry** chat (`gpt-5.6-sol`); **pluggable embeddings** — `foundry` (Azure OpenAI, default), `voyage` (Voyage AI direct), or `atlas_auto` (Atlas Automated Embedding) via `EMBEDDING_PROVIDER` (see specs/002) |
 | Tool gateway | Foundry **MCP tool** → **self-hosted `mongodb/mongodb-mcp-server`** on **Azure Container Apps** (Streamable HTTP `/mcp`, API-key header) |
 | Memory | **MongoDB** short-term (`chat_messages`) + long-term facts (`agent_memory_facts`) + per-turn agent traces (`agent_traces`) |
 | API | **FastAPI** + SSE |
@@ -30,7 +30,13 @@ This demo assumes **you** have already provisioned:
 
 1. **Azure AI Foundry project** — `azure-multiagent-proj`. Copy its **project endpoint**.
 2. **Chat model deployment** — `gpt-5.6-sol` (used by all specialists + classifier/synthesizer/fact-extractor).
-3. **Embedding deployment** — `text-embedding-3-large` → **3072-dim** vectors.
+3. **Embedding provider** — default `foundry`: an Azure OpenAI embedding deployment
+   (`text-embedding-3-large` → **3072-dim**). Alternatives via `EMBEDDING_PROVIDER`:
+   `voyage` (direct Voyage AI API — needs `VOYAGE_API_KEY`) or `atlas_auto` (Atlas Automated
+   Embedding — no embedding credentials; Atlas embeds at index & query time). See
+   [specs/002](specs/002-configurable-embedding-provider/spec.md). Switching providers
+   requires `python -m db_seeding.seed_all --drop --recreate-indexes` + recalibrating
+   `RETRIEVAL_MIN_SCORE` (`python -m scripts.calibrate_retrieval_floor`).
 4. **MongoDB Atlas** — cluster `FabricCluster`, database `multi-agent`, on a tier that supports **Atlas Vector Search** (M10+ or Flex). Have the connection string ready.
 5. **Azure CLI** logged in (`az login`) with access to the tenant/subscription — used for `DefaultAzureCredential`.
 
@@ -199,8 +205,10 @@ cd deploy
 
 Provisions (via `main.bicep` + `keyvault.bicep` + `mcp.bicep` + `monitoring.bicep`): a Log Analytics
 workspace, Application Insights, a Container Apps environment, ACR, Key Vault + a user-assigned managed
-identity, the **self-hosted MongoDB MCP Container App**, the embedding Azure Function, the API + UI
-Container Apps, and the Azure Monitor alerts/workbook. `deploy.sh` generates the MCP API key, pushes
+identity, the **self-hosted MongoDB MCP Container App**, and the API + UI
+Container Apps, plus the Azure Monitor alerts/workbook. There is **no embedding Function App**
+(specs/002) — the API calls the configured embedding provider directly; for `EMBEDDING_PROVIDER=voyage`
+set `VOYAGE_API_KEY` in `.env` and it is pushed to Key Vault like the other secrets. `deploy.sh` generates the MCP API key, pushes
 secrets into Key Vault, builds/pushes images, deploys, then runs the post-deploy smoke test and writes
 endpoints to `.env.live`. The MongoDB Atlas cluster and the Foundry project/model deployments are
 **reused** (not redeployed).
@@ -219,8 +227,8 @@ OpenTelemetry distro (`src/telemetry.py`). Spans cover `chat.turn` → classify 
 → synthesize, plus auto-instrumented FastAPI/httpx/pymongo. Custom metrics: `chat.turns`,
 `chat.errors`, `chat.latency_ms`, `specialist.invocations`, `tool.calls`, `llm.tokens`.
 
-`monitoring.bicep` provisions an Ops **workbook** and 7 alerts (API 5xx, p95 latency, container
-restarts, chat-error rate, token-budget, embedding-Function failures). Enable export by setting
+`monitoring.bicep` provisions an Ops **workbook** and 6 alerts (API 5xx, p95 latency, container
+restarts, chat-error rate, token-budget). Enable export by setting
 `APPLICATIONINSIGHTS_CONNECTION_STRING` (set automatically in the cloud stack); everything no-ops
 cleanly when it's unset.
 
@@ -268,11 +276,12 @@ RUN_E2E=1 API_URL=<url> pytest -m e2e     # SSE contract against a running API
 config/agents/    orchestrator|job-match|career-coach|company-intel .agent.md
 config/skills/    SKILL.md per specialist
 src/              app.py, orchestrator.py, classifier.py, foundry_agents.py, foundry_registry.py,
-                  hosted_agent.py, agent_host.py, memory.py, retrieval.py, embeddings.py,
+                  hosted_agent.py, agent_host.py, memory/ (package: facade + mongo/foundry backends),
+                  retrieval.py, embeddings.py (provider facade: foundry|voyage|atlas_auto),
                   mcp_client.py, llm.py, telemetry.py, config_loader.py, settings.py
 scripts/          provision_agents.py, provision_hosted.py
-db_seeding/       seed_all.py + Atlas index definitions + sample data
-embedding-function/  Azure Function (POST /embed) — reused from mongodb-foundry-agent
+db_seeding/       seed_all.py + provider-aware Atlas index definitions + sample data
+specs/            spec-driven development — approved specs + plans before code (see specs/README.md)
 ui/               streamlit_app.py (chat + Usage&Cost sidebar) · theme.py (MongoDB Design Language)
                   pages/2_Sessions.py (sessions + agent traces) · pages/3_Metrics.py (dashboard)
 tests/            unit/ (offline) · integration/ · e2e/ · conftest.py    smoke/ post-deploy check

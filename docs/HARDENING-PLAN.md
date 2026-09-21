@@ -106,7 +106,9 @@ Azure Monitor**, with dashboards and metric alerts.
   `deploy/main.bicep`, `WorkspaceResourceId` = the existing Log Analytics
   workspace (`logAnalytics.id`, main.bicep:64).
 - Inject `APPLICATIONINSIGHTS_CONNECTION_STRING` into the API container app env
-  (main.bicep:157) and the embedding Function app settings (main.bicep:120).
+  (main.bicep) and the embedding Function app settings.
+  > Note (specs/002): the embedding Function App has since been removed — embeddings are
+  > called directly by the API app.
 - Output the connection string / App Insights name.
 
 **1.7 Dashboards + alerts as IaC (1d)**
@@ -121,8 +123,8 @@ Azure Monitor**, with dashboards and metric alerts.
     3. Chat error-event rate > threshold
     4. Specialist failure rate > threshold
     5. LLM token spend/hour > budget
-    6. Embedding Function failures
-    7. Container App replica restarts / unhealthy
+    6. Container App replica restarts / unhealthy
+    (The embedding-Function-failures alert was dropped when the Function was removed in specs/002.)
   - An **Action Group** (`Microsoft.Insights/actionGroups`) for email/webhook.
 
 **1.8 Runbook doc (0.25d)**

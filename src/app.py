@@ -51,6 +51,17 @@ def _startup() -> None:
         logger.warning("Could not ensure memory indexes at startup: %s", e)
 
 
+def _embedding_report(s) -> dict:
+    """Effective embedding config for /health (specs/002 R9). atlas_auto embeds
+    server-side, so it reports its declared index model and no dimensions."""
+    if s.embedding_provider == "foundry":
+        return {"embedding_model": s.embedding_model, "embedding_dimensions": s.embedding_dimensions}
+    if s.embedding_provider == "voyage":
+        return {"embedding_model": s.voyage_model,
+                "embedding_dimensions": s.voyage_dimensions or None}
+    return {"embedding_model": s.atlas_embed_model, "embedding_dimensions": None}
+
+
 @app.get("/health")
 def health() -> dict:
     s = get_settings()
@@ -58,8 +69,10 @@ def health() -> dict:
         "status": "ok",
         "specialist_mode": s.specialist_mode,
         "classifier_backend": s.classifier_backend,
+        "memory_backend": s.short_term_memory_backend,
         "chat_deployment": s.chat_deployment,
-        "embedding_model": s.embedding_model,
+        "embedding_provider": s.embedding_provider,
+        **_embedding_report(s),
         "mongodb_db": s.mongodb_db,
         "mcp_url": s.mongodb_mcp_url,
         "mcp_configured": bool(s.mongodb_mcp_url),

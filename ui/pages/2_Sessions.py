@@ -116,6 +116,10 @@ def _render_turn(t: dict) -> None:
             reasoning_flow(steps)
         else:
             st.caption("No reasoning steps recorded.")
+        live_reasoning = t.get("reasoning_text", "")
+        if live_reasoning:
+            with st.expander("🧠 Model reasoning (streamed)", expanded=False):
+                st.markdown(live_reasoning)
         if t.get("final"):
             st.markdown("**Final answer**")
             st.markdown(t["final"])

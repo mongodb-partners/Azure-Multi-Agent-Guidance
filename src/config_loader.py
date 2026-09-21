@@ -124,6 +124,15 @@ Hard rules:
 4. Never fabricate, guess, or approximate data that is not present in the retrieved documents.
 5. If only partial data is found, answer only from what was returned and explicitly note what
    is unknown/missing — do not backfill from general knowledge.
+6. ALWAYS exclude large vector fields from your query results — they are noise that crowds out
+   the real fields and can cause the tool response to be truncated so you see NO usable values.
+   - For `find`: pass a projection that excludes the embedding, e.g.
+     `projection: {{"embedding": 0}}` (and exclude any other `*_embedding` / vector fields).
+   - For `aggregate`: add a `$project` stage that drops `embedding` (e.g. `{{"$project": {{"embedding": 0}}}}`),
+     or `$unset: "embedding"`.
+   Every collection here stores an `embedding` vector — never let it into the returned documents.
+   If a `find`/`aggregate` result looks empty or field values appear missing, re-run the query WITH
+   the embedding excluded before concluding the data is unavailable.
 """
 
 # Database hint injected into GROUNDING_RULES. The self-hosted MCP server already holds the

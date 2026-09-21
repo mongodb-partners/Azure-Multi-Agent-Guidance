@@ -3,7 +3,7 @@ name: job-match
 description: >
   Matches a candidate's CV, skills, and preferences against open job postings and ranks the
   best fits. Use for "find jobs for me", "which roles match my skills", "jobs in <city/role>".
-model: gpt-4o
+model: gpt-5.6-sol
 tools:
   - mongodb_find
   - mongodb_aggregate

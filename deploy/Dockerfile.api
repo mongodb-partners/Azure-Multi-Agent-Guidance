@@ -4,8 +4,10 @@ FROM python:3.11-slim
 WORKDIR /app
 ENV PYTHONUNBUFFERED=1 PIP_NO_CACHE_DIR=1
 
-COPY requirements.txt .
-RUN pip install -r requirements.txt
+# Core deps + Foundry Agent Service SDK (azure-ai-projects) so the API can invoke the
+# registered prompt agents on the Foundry managed runtime (SPECIALIST_MODE=registered).
+COPY requirements.txt requirements-foundry.txt ./
+RUN pip install -r requirements.txt -r requirements-foundry.txt
 
 COPY src/ ./src/
 COPY config/ ./config/

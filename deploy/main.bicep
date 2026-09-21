@@ -1,10 +1,14 @@
 // =============================================================================
 // Multi-Agent Career Assistant — supporting Azure infra (runnable-demo scope)
 //
-// Provisions: Log Analytics, Container Apps environment, ACR, the embedding Azure
-// Function, and the API + UI Container Apps. Secrets (Azure OpenAI key, Mongo URI)
+// Provisions: Log Analytics, Container Apps environment, ACR, and the API + UI
+// Container Apps. Secrets (Azure OpenAI key, Mongo URI, MCP key, optional Voyage key)
 // are read from Azure Key Vault via a user-assigned managed identity — the values
 // are pushed into Key Vault by deploy.sh and never transit Bicep parameters.
+//
+// Embeddings (specs/002): the app calls the configured provider directly — there is
+// NO embedding Function App. EMBEDDING_PROVIDER=foundry (direct Azure OpenAI, default),
+// voyage (direct Voyage AI API), or atlas_auto (Atlas generates embeddings itself).
 //
 // The MongoDB MCP server is SELF-HOSTED here (mcp.bicep module → mongodb/mongodb-mcp-server on
 // Container Apps). Foundry project + model deployments are assumed pre-provisioned (see README
@@ -24,13 +28,26 @@ param projectEndpoint string
 @description('Chat model deployment name (specialists + utility LLM)')
 param chatDeployment string = 'gpt-5.6-sol'
 
-@description('Embedding model deployment name')
+@description('Embedding provider: foundry (Azure OpenAI, direct) | voyage (Voyage AI, direct) | atlas_auto (Atlas Automated Embedding)')
+@allowed(['foundry', 'voyage', 'atlas_auto'])
+param embeddingProvider string = 'foundry'
+
+@description('Embedding model deployment name (provider=foundry)')
 param embeddingModel string = 'text-embedding-3-large'
 
-@description('Embedding dimensions (3072 for text-embedding-3-large)')
+@description('Embedding dimensions (provider=foundry; 3072 for text-embedding-3-large)')
 param embeddingDimensions int = 3072
 
-@description('Azure OpenAI endpoint (for the embedding function)')
+@description('Voyage model name (provider=voyage)')
+param voyageModel string = 'voyage-3-large'
+
+@description('Atlas Automated Embedding model (provider=atlas_auto)')
+param atlasEmbedModel string = 'voyage-4'
+
+@description('Name of the Key Vault secret holding the Voyage API key (provider=voyage)')
+param voyageApiKeySecretName string = 'voyage-api-key'
+
+@description('Azure OpenAI endpoint (chat fallbacks + embeddings when provider=foundry)')
 param azureOpenAIEndpoint string
 
 @description('Key Vault name holding the secrets (created by keyvault.bicep, populated by deploy.sh)')
@@ -76,10 +93,6 @@ param alertEmail string = ''
 var envName = '${prefix}-cae'
 var apiAppName = '${prefix}-api'
 var uiAppName = '${prefix}-ui'
-// Function App names must be GLOBALLY unique (…​.azurewebsites.net). Suffix with a
-// per-resource-group hash so multiple RGs/regions don't collide on the same name.
-var functionAppName = '${prefix}-embed-func-${uniqueString(resourceGroup().id)}'
-var storageAccountName = toLower('st${uniqueString(resourceGroup().id)}')
 
 // ---------------------------------------------------------------------------
 // Observability + Container Apps environment
@@ -136,55 +149,7 @@ resource kv 'Microsoft.KeyVault/vaults@2023-07-01' existing = {
 var aoaiKeySecretUri = '${kv.properties.vaultUri}secrets/${aoaiKeySecretName}'
 var mongoUriSecretUri = '${kv.properties.vaultUri}secrets/${mongoUriSecretName}'
 var mcpApiKeySecretUri = '${kv.properties.vaultUri}secrets/${mcpApiKeySecretName}'
-
-// ---------------------------------------------------------------------------
-// Embedding Azure Function (reused pattern from mongodb-foundry-agent)
-// ---------------------------------------------------------------------------
-resource storageAccount 'Microsoft.Storage/storageAccounts@2023-01-01' = {
-  name: storageAccountName
-  location: location
-  sku: { name: 'Standard_LRS' }
-  kind: 'StorageV2'
-}
-
-resource hostingPlan 'Microsoft.Web/serverfarms@2023-01-01' = {
-  name: '${functionAppName}-plan'
-  location: location
-  sku: { name: 'Y1', tier: 'Dynamic' }
-  properties: { reserved: true }
-}
-
-resource functionApp 'Microsoft.Web/sites@2023-01-01' = {
-  name: functionAppName
-  location: location
-  kind: 'functionapp,linux'
-  identity: {
-    type: 'UserAssigned'
-    userAssignedIdentities: {
-      '${workloadIdentityId}': {}
-    }
-  }
-  properties: {
-    serverFarmId: hostingPlan.id
-    httpsOnly: true
-    keyVaultReferenceIdentity: workloadIdentityId
-    siteConfig: {
-      linuxFxVersion: 'PYTHON|3.11'
-      appSettings: [
-        { name: 'AzureWebJobsStorage', value: 'DefaultEndpointsProtocol=https;AccountName=${storageAccount.name};AccountKey=${storageAccount.listKeys().keys[0].value}' }
-        { name: 'FUNCTIONS_EXTENSION_VERSION', value: '~4' }
-        { name: 'FUNCTIONS_WORKER_RUNTIME', value: 'python' }
-        { name: 'AZURE_OPENAI_ENDPOINT', value: azureOpenAIEndpoint }
-        // Key Vault reference — resolved at runtime via the user-assigned identity.
-        { name: 'AZURE_OPENAI_API_KEY', value: '@Microsoft.KeyVault(SecretUri=${aoaiKeySecretUri})' }
-        { name: 'EMBEDDING_MODEL', value: embeddingModel }
-        { name: 'APPLICATIONINSIGHTS_CONNECTION_STRING', value: appInsights.properties.ConnectionString }
-      ]
-    }
-  }
-}
-
-var embeddingFunctionUrl = 'https://${functionApp.properties.defaultHostName}/api/embed'
+var voyageApiKeySecretUri = '${kv.properties.vaultUri}secrets/${voyageApiKeySecretName}'
 
 // ---------------------------------------------------------------------------
 // Self-hosted MongoDB MCP server (Azure Container Apps) — replaces the remote managed MCP.
@@ -230,13 +195,15 @@ resource apiApp 'Microsoft.App/containerApps@2024-03-01' = {
     configuration: {
       ingress: { external: true, targetPort: 3000, transport: 'auto' }
       registries: [ { server: acr.properties.loginServer, username: acr.name, passwordSecretRef: 'acr-pwd' } ]
-      secrets: [
+      secrets: concat([
         { name: 'acr-pwd', value: acr.listCredentials().passwords[0].value }
         // Key Vault references — resolved by the user-assigned identity (no secret values in Bicep).
         { name: 'mongo-uri', keyVaultUrl: mongoUriSecretUri, identity: workloadIdentityId }
         { name: 'aoai-key', keyVaultUrl: aoaiKeySecretUri, identity: workloadIdentityId }
         { name: 'mcp-api-key', keyVaultUrl: mcpApiKeySecretUri, identity: workloadIdentityId }
-      ]
+      ], embeddingProvider == 'voyage' ? [
+        { name: 'voyage-api-key', keyVaultUrl: voyageApiKeySecretUri, identity: workloadIdentityId }
+      ] : [])
     }
     template: {
       containers: [
@@ -244,15 +211,18 @@ resource apiApp 'Microsoft.App/containerApps@2024-03-01' = {
           name: 'api'
           image: '${acr.properties.loginServer}/career-api:${imageTag}'
           resources: { cpu: json('1.0'), memory: '2Gi' }
-          env: [
+          env: concat([
             { name: 'AZURE_AI_PROJECT_ENDPOINT', value: projectEndpoint }
             { name: 'AZURE_AI_MODEL_DEPLOYMENT_NAME', value: chatDeployment }
             { name: 'CLASSIFIER_MODEL_DEPLOYMENT', value: chatDeployment }
             { name: 'AZURE_OPENAI_ENDPOINT', value: azureOpenAIEndpoint }
             { name: 'AZURE_OPENAI_API_KEY', secretRef: 'aoai-key' }
+            // Embedding provider config (specs/002). The app calls the provider directly.
+            { name: 'EMBEDDING_PROVIDER', value: embeddingProvider }
             { name: 'EMBEDDING_MODEL', value: embeddingModel }
             { name: 'EMBEDDING_DIMENSIONS', value: string(embeddingDimensions) }
-            { name: 'EMBEDDING_FUNCTION_URL', value: embeddingFunctionUrl }
+            { name: 'VOYAGE_MODEL', value: voyageModel }
+            { name: 'ATLAS_EMBED_MODEL', value: atlasEmbedModel }
             { name: 'MONGODB_URI', secretRef: 'mongo-uri' }
             { name: 'MONGODB_DB', value: mongoDb }
             // Self-hosted MongoDB MCP endpoint (deployed by the mcp.bicep module) + its API-key header.
@@ -266,7 +236,9 @@ resource apiApp 'Microsoft.App/containerApps@2024-03-01' = {
             { name: 'APPLICATIONINSIGHTS_CONNECTION_STRING', value: appInsights.properties.ConnectionString }
             { name: 'OTEL_ENABLED', value: 'true' }
             { name: 'OTEL_SERVICE_NAME', value: 'career-assistant-api' }
-          ]
+          ], embeddingProvider == 'voyage' ? [
+            { name: 'VOYAGE_API_KEY', secretRef: 'voyage-api-key' }
+          ] : [])
         }
       ]
       scale: { minReplicas: 1, maxReplicas: 2 }
@@ -316,7 +288,6 @@ module monitoring 'monitoring.bicep' = {
     location: location
     prefix: prefix
     appInsightsId: appInsights.id
-    logAnalyticsId: logAnalytics.id
     apiAppId: apiApp.id
     alertEmail: alertEmail
   }
@@ -326,8 +297,7 @@ output acrLoginServer string = acr.properties.loginServer
 output acrName string = acr.name
 output apiUrl string = 'https://${apiApp.properties.configuration.ingress.fqdn}'
 output uiUrl string = 'https://${uiApp.properties.configuration.ingress.fqdn}'
-output embeddingFunctionUrl string = embeddingFunctionUrl
-output functionAppName string = functionApp.name
+output embeddingProvider string = embeddingProvider
 output appInsightsConnectionString string = appInsights.properties.ConnectionString
 output mcpUrl string = mcp.outputs.mcpUrl
 output mcpAppName string = mcp.outputs.mcpAppName

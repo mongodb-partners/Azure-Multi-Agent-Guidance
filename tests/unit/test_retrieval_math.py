@@ -83,3 +83,91 @@ def test_mmr_without_embeddings_falls_back_to_head():
     docs = [{"_id": "a"}, {"_id": "b"}, {"_id": "c"}]  # no embedding field
     picked = _mmr(docs, [1.0, 0.0], cfg, top_n=2)
     assert [d["_id"] for d in picked] == ["a", "b"]
+
+
+# --------------------------------------------------------------------------- #
+# specs/002 — provider-aware query stages + relevance floor resolution
+# --------------------------------------------------------------------------- #
+import src.retrieval as retrieval
+from src.retrieval import (
+    _auto_embed_stage,
+    _vector_stage,
+    hybrid_search,
+    resolve_min_score,
+)
+from src.settings import Settings
+
+
+def test_vector_stage_uses_query_vector():
+    cfg = RetrievalConfig(collection="c")
+    stage = _vector_stage(cfg, [0.1, 0.2], k=5)["$vectorSearch"]
+    assert stage["path"] == "embedding"
+    assert stage["queryVector"] == [0.1, 0.2]
+    assert "query" not in stage
+
+
+def test_auto_embed_stage_uses_query_text_on_embed_text_field():
+    cfg = RetrievalConfig(collection="c")
+    stage = _auto_embed_stage(cfg, "find me a job", k=5)["$vectorSearch"]
+    assert stage["path"] == "embed_text"
+    assert stage["query"] == "find me a job"
+    assert "queryVector" not in stage
+
+
+def _patch_settings(monkeypatch, **overrides):
+    monkeypatch.setattr(retrieval, "get_settings", lambda: Settings(**overrides))
+
+
+def test_resolve_min_score_explicit_override_wins(monkeypatch):
+    _patch_settings(monkeypatch, embedding_provider="voyage", retrieval_min_score=0.42)
+    assert resolve_min_score() == 0.42
+
+
+def test_resolve_min_score_foundry_default_preserves_legacy_behavior(monkeypatch):
+    _patch_settings(monkeypatch, embedding_provider="foundry", retrieval_min_score=None)
+    assert resolve_min_score() == 0.60
+
+
+def test_resolve_min_score_uncalibrated_providers_disable_floor(monkeypatch):
+    for provider in ("voyage", "atlas_auto"):
+        _patch_settings(monkeypatch, embedding_provider=provider, retrieval_min_score=None)
+        retrieval._floor_warned = False
+        assert resolve_min_score() is None
+
+
+def test_hybrid_search_atlas_auto_never_embeds_client_side(monkeypatch):
+    """R3/R-Q5: text query goes straight to $vectorSearch; no embed call, no MMR."""
+    _patch_settings(monkeypatch, embedding_provider="atlas_auto")
+    monkeypatch.setattr(retrieval, "embed_text",
+                        lambda *a, **k: pytest.fail("client-side embedding forbidden"))
+    monkeypatch.setattr(retrieval, "_mmr",
+                        lambda *a, **k: pytest.fail("MMR must be skipped under atlas_auto"))
+    captured = {}
+
+    def _fake_vs(cfg, stage, k):
+        captured["stage"] = stage
+        return [{"_id": "v1", "_vs_score": 0.9}]
+
+    monkeypatch.setattr(retrieval, "_vector_search", _fake_vs)
+    monkeypatch.setattr(retrieval, "_text_search", lambda cfg, q, k: [])
+    cfg = RetrievalConfig(collection="c")
+    hits = hybrid_search("senior python role", cfg, top_n=3)
+    assert captured["stage"]["$vectorSearch"]["query"] == "senior python role"
+    assert hits[0]["_id"] == "v1"
+
+
+def test_hybrid_search_foundry_pipeline_unchanged(monkeypatch):
+    """AC1: embed query → vector stage with queryVector → RRF → MMR."""
+    _patch_settings(monkeypatch, embedding_provider="foundry")
+    calls = []
+    monkeypatch.setattr(retrieval, "embed_text",
+                        lambda text, input_type=None: calls.append(("embed", input_type)) or [1.0])
+    monkeypatch.setattr(retrieval, "_vector_search",
+                        lambda cfg, stage, k: calls.append(("vs", stage)) or [])
+    monkeypatch.setattr(retrieval, "_text_search", lambda cfg, q, k: [])
+    monkeypatch.setattr(retrieval, "_mmr",
+                        lambda docs, qv, cfg, top_n: calls.append(("mmr", qv)) or docs[:top_n])
+    hybrid_search("q", RetrievalConfig(collection="c"))
+    assert calls[0] == ("embed", "query")
+    assert calls[1][0] == "vs" and "queryVector" in calls[1][1]["$vectorSearch"]
+    assert calls[2] == ("mmr", [1.0])

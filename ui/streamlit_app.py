@@ -91,6 +91,10 @@ def render_trace(events: list[tuple[str, dict]]) -> None:
             st.markdown(f"🔎 Hybrid retrieval grounded **{data.get('agent')}**")
         elif etype == "specialist_start":
             st.markdown(f"▶️ **{data.get('agent')}** working…")
+        elif etype == "specialist_source":
+            src = data.get("source")
+            label = "Foundry managed agent runtime" if src == "registered" else "in-process (inline)"
+            st.markdown(f"&nbsp;&nbsp;🏛️ `{data.get('agent')}` served by **{label}**")
         elif etype == "tool_call":
             st.markdown(f"&nbsp;&nbsp;🔧 `{data.get('agent')}` → MongoDB MCP `{data.get('tool')}`")
         elif etype == "synthesizing":
@@ -170,15 +174,33 @@ if prompt := st.chat_input("Ask about jobs, career growth, or companies…"):
 
     with st.chat_message("assistant"):
         trace_box = st.expander("🔬 Agent trace", expanded=True)
+        reasoning_box = st.expander("🧠 Reasoning (live)", expanded=True)
+        reasoning_slot = reasoning_box.empty()
+        reasoning_slot.caption("_Waiting for the model to start reasoning…_")
         answer_box = st.empty()
         events: list[tuple[str, dict]] = []
         final_text = ""
+        streamed_text = ""       # answer accumulated live from `delta` events
+        reasoning_text = ""      # reasoning accumulated live from `reasoning` events
+        streamed_final = False   # True when `final` says the answer already streamed
         usage: dict = {}
         try:
             for etype, data in stream_chat(api_url, prompt, session_id, user_id):
-                if etype == "final":
+                if etype == "reasoning":
+                    reasoning_text += data.get("text", "")
+                    reasoning_slot.markdown(reasoning_text)
+                elif etype == "delta":
+                    # Live answer token chunk — append and re-render progressively.
+                    streamed_text += data.get("text", "")
+                    answer_box.markdown(streamed_text + " ▌")
+                elif etype == "final":
                     final_text = data.get("text", "")
-                    answer_box.markdown(final_text)
+                    streamed_final = bool(data.get("streamed"))
+                    # If the answer already streamed live, keep it (avoids flicker); otherwise
+                    # (direct fallback / synthesized reply) render the authoritative final text.
+                    answer_box.markdown(final_text if (final_text and not streamed_final) else streamed_text)
+                    if not final_text:
+                        final_text = streamed_text
                 elif etype == "usage":
                     usage = data
                 elif etype == "done":
@@ -190,6 +212,12 @@ if prompt := st.chat_input("Ask about jobs, career growth, or companies…"):
         except Exception as e:  # noqa: BLE001
             final_text = f"⚠️ Error talking to the API: {e}"
             answer_box.error(final_text)
+        else:
+            # Stream ended cleanly: settle the answer (drop the live cursor) and, if no `final`
+            # event arrived, fall back to whatever streamed live.
+            if not final_text:
+                final_text = streamed_text
+            answer_box.markdown(final_text)
 
         # Inline per-turn telemetry: latency + token usage.
         if usage:

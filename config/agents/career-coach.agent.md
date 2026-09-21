@@ -4,7 +4,7 @@ description: >
   Career coaching: skill-gap analysis, upskilling plans, career-path progression, resume
   feedback, and interview preparation. Use for "how do I get to <role>", "what skills am I
   missing", "help me prep for an interview", "review my resume".
-model: gpt-4o
+model: gpt-5.6-sol
 tools:
   - mongodb_find
   - mongodb_aggregate

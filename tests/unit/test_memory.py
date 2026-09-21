@@ -14,7 +14,9 @@ mongomock = pytest.importorskip("mongomock")
 def fake_db(monkeypatch):
     client = mongomock.MongoClient()
     db = client["multi-agent"]
-    monkeypatch.setattr(memory, "_db", lambda: db)
+    # The Atlas client singleton lives in src.memory._shared since the specs/001 package
+    # split; patching it there covers every backend and facade function at once.
+    monkeypatch.setattr(memory._shared, "_db", lambda: db)
     return db
 
 

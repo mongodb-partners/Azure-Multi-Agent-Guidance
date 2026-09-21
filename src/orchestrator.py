@@ -11,12 +11,13 @@ Each specialist is a persistent Foundry prompt agent (see `foundry_agents.py` /
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any, Iterator
 
 from . import memory, telemetry
 from .classifier import classify
 from .foundry_agents import get_registry
-from .llm import chat_text
+from .llm import chat_text, chat_text_stream
 from .retrieval import PRESETS, hybrid_search
 
 logger = logging.getLogger(__name__)
@@ -46,16 +47,89 @@ class _Trace:
         self.routing: dict[str, Any] = {}
         self.specialists: list[str] = []
         self.final: str = ""
+        self.reasoning_text: str = ""            # accumulated live reasoning (token deltas)
+        self.citations: dict[str, Any] = {}      # cited-vs-supplied grounding ids for this turn
 
     def event(self, ev: dict[str, Any]) -> None:
+        # Accumulate live reasoning into one field instead of storing hundreds of tiny
+        # `delta`/`reasoning` events (they'd bloat the persisted trace; the final answer and
+        # reasoning summary are captured separately).
+        etype = ev.get("type")
+        if etype == "reasoning":
+            self.reasoning_text += ev.get("text", "")
+            return
+        if etype == "delta":
+            return
         self.events.append(ev)
 
     def step(self, label: str, detail: str = "", **extra: Any) -> None:
         self.reasoning.append({"step": label, "detail": detail, **extra})
 
 
+GROUNDING_BUDGET_CHARS = 6000
+_CITE_PREFIX = {"jobs": "j", "companies": "c", "interview_prep": "q"}
+_CITE_RE = re.compile(r"\[([a-z]{1,2}\d{1,2})\]")
+
+
+def _relevant(hit: dict[str, Any]) -> bool:
+    """Is this candidate actually similar to the query, or just the least-bad row available?
+
+    RRF scores are rank-based — rank 1 of garbage scores identically to rank 1 of gold — so the
+    floor has to come from the cosine `_vs_score`. Note Atlas normalises cosine to (1+cos)/2, so
+    0.5 means *orthogonal*, not "half relevant"; a floor below ~0.6 filters almost nothing.
+
+    A BM25-only hit has no `_vs_score` and is dropped. `$search` ORs the query terms, so one
+    common word ("shift", "senior") is enough to match, and BM25 scores have no query-comparable
+    scale to threshold on. Little is lost: this block is only a pre-fetch, and the agent still has
+    MongoDB MCP to run its own keyword queries.
+    """
+    from .retrieval import resolve_min_score
+
+    # specs/002 R7: provider-aware floor; None (uncalibrated provider) = no filtering.
+    # ponytail: one global cosine floor; make it per-preset if collections differ in scale.
+    floor = resolve_min_score()
+    return floor is None or float(hit.get("_vs_score") or 0.0) >= floor
+
+
+def _grounding_block(preset_name: str, hits: list[dict[str, Any]]) -> tuple[str, list[dict[str, Any]]]:
+    """Serialize hits for the prompt: short cite ids, no internals, whole-document budget.
+
+    Budgeting by document (not by character) matters — slicing the serialized array at a fixed
+    offset hands the model a half-written JSON document, which it will happily complete for you.
+    """
+    import json
+
+    prefix = _CITE_PREFIX.get(preset_name, "d")
+    rows: list[dict[str, Any]] = []
+    used = 0
+    for i, h in enumerate(hits, 1):
+        cite = f"{prefix}{i}"
+        h["_cite_id"] = cite  # retained on the trace so citations can be verified after the turn
+        doc = {"id": cite, **{k: v for k, v in h.items() if not k.startswith("_")}}
+        blob = json.dumps(doc, default=str)
+        if rows and used + len(blob) > GROUNDING_BUDGET_CHARS:
+            break
+        rows.append(doc)
+        used += len(blob)
+    if not rows:
+        return "", []
+    text = (
+        "\n\n## Grounding candidates (host-retrieved from MongoDB via hybrid vector+BM25)\n"
+        "These rows are MongoDB data — the grounding contract applies to them unchanged.\n"
+        "Cite the `id` of every row you use, inline, like [j1]. If none of them answer the "
+        "request, say so and query MongoDB yourself rather than stretching a row to fit.\n"
+        + "\n".join(json.dumps(d, default=str) for d in rows)
+    )
+    return text, hits[: len(rows)]
+
+
 def _retrieve_context(specialist: str, query: str) -> tuple[str, list[dict[str, Any]]]:
-    """Host-side hybrid pre-retrieval. Returns (prompt_text, hits). Empty if unavailable."""
+    """Host-side hybrid pre-retrieval. Returns (prompt_text, hits). Empty if unavailable.
+
+    Returning nothing when nothing clears the relevance floor is the point: an empty grounding
+    block lets the abstain rule in GROUNDING_RULES fire, instead of handing the agent five
+    irrelevant rows under a header that tells it to prefer them.
+    """
     preset_name = _RETRIEVAL_FOR.get(specialist)
     if not preset_name:
         return "", []
@@ -64,33 +138,50 @@ def _retrieve_context(specialist: str, query: str) -> tuple[str, list[dict[str, 
     except Exception as e:  # noqa: BLE001
         logger.info("Retrieval skipped for %s: %s", specialist, e)
         return "", []
+    hits = [h for h in hits if _relevant(h)]
     if not hits:
         return "", []
-    import json
+    return _grounding_block(preset_name, hits)
 
-    text = (
-        "\n\n## Grounding candidates (host-retrieved via hybrid vector+BM25)\n"
-        "Prefer these; you may refine with your own MongoDB queries.\n"
-        f"{json.dumps(hits, default=str)[:6000]}"
-    )
-    return text, hits
+
+def _check_citations(final: str, hits: list[dict[str, Any]]) -> dict[str, Any]:
+    """Compare the ids cited in the answer against the ids actually supplied to the agent."""
+    supplied = {h["_cite_id"] for h in hits if h.get("_cite_id")}
+    cited = set(_CITE_RE.findall(final))
+    invalid = cited - supplied
+    return {
+        "supplied": sorted(supplied),
+        "cited": sorted(cited),
+        "invalid": sorted(invalid),
+        "grounded": bool(cited) and not invalid,
+    }
 
 
 def _augment(query: str, history: str, facts: str, grounding: str) -> str:
+    """Assemble the turn context. Section order is fixed so the same state builds the same prompt.
+
+    The request goes LAST, directly after its evidence — and prior assistant turns are marked as
+    context rather than evidence, so the model does not re-ground on its own earlier output.
+    """
     parts = []
     if facts:
         parts.append(f"## Known facts about the user\n{facts}")
     if history:
-        parts.append(f"## Recent conversation\n{history}")
-    parts.append(f"## Current request\n{query}")
+        parts.append(
+            "## Recent conversation (context only — not evidence; verify claims against MongoDB)\n"
+            + history
+        )
     if grounding:
         parts.append(grounding)
+    parts.append(f"## Current request\n{query}")
     return "\n\n".join(parts)
 
 
 def _synthesize(query: str, answers: dict[str, str]) -> str:
     """Merge multiple specialist answers into one coherent reply (port of the synthesizer)."""
-    joined = "\n\n".join(f"### {name} said:\n{ans}" for name, ans in answers.items())
+    # Sorted, not insertion-ordered: under fan-out the dict order is whichever thread finished
+    # first, which would build a different prompt from identical answers.
+    joined = "\n\n".join(f"### {name} said:\n{ans}" for name, ans in sorted(answers.items()))
     return chat_text(
         [
             {
@@ -107,8 +198,8 @@ def _synthesize(query: str, answers: dict[str, str]) -> str:
     )
 
 
-def _direct_reply(message: str, history: str, facts: str) -> str:
-    """Orchestrator answers small talk / capability questions directly (no specialist)."""
+def _direct_reply_messages(message: str, history: str, facts: str) -> list[dict[str, str]]:
+    """Build the chat messages for a direct (no-specialist) orchestrator reply."""
     from .config_loader import load_agents
 
     orch = next((a for a in load_agents().values() if not a.routable), None)
@@ -118,11 +209,25 @@ def _direct_reply(message: str, history: str, facts: str) -> str:
         ctx += f"\n\n## Known facts about the user\n{facts}"
     if history:
         ctx += f"\n\n## Recent conversation\n{history}"
+    return [
+        {"role": "system", "content": system + ctx},
+        {"role": "user", "content": message},
+    ]
+
+
+def _direct_reply(message: str, history: str, facts: str) -> str:
+    """Orchestrator answers small talk / capability questions directly (no specialist)."""
     return chat_text(
-        [
-            {"role": "system", "content": system + ctx},
-            {"role": "user", "content": message},
-        ],
+        _direct_reply_messages(message, history, facts),
+        temperature=0.4,
+        max_tokens=1200,
+    )
+
+
+def _direct_reply_stream(message: str, history: str, facts: str) -> Iterator[str]:
+    """Streaming variant: yield the direct reply chunk-by-chunk for live rendering."""
+    yield from chat_text_stream(
+        _direct_reply_messages(message, history, facts),
         temperature=0.4,
         max_tokens=1200,
     )
@@ -156,7 +261,19 @@ def _run_specialist(
         augmented = _augment(message, history, facts, grounding)
         try:
             for ev in reg.get(specialist).stream_query(augmented):
-                if ev.type == "tool_call":
+                if ev.type == "status":
+                    # Surface which runtime served this specialist ("registered" = Foundry
+                    # managed agent runtime, else inline) so the UI/trace can show it.
+                    source = ev.data.get("source")
+                    if source:
+                        if trace is not None:
+                            trace.step("runtime",
+                                       f"**{specialist}** served by the **{source}** runtime"
+                                       + (" (Foundry managed agent)" if source == "registered"
+                                          else " (in-process)") + ".",
+                                       agent=specialist, source=source)
+                        yield _event("specialist_source", agent=specialist, source=source)
+                elif ev.type == "tool_call":
                     tool = ev.data.get("tool")
                     telemetry.record_tool_call(tool, agent=specialist)
                     telemetry.add_event(sp, "tool_call", tool=tool)
@@ -167,6 +284,12 @@ def _run_specialist(
                                    f"**{specialist}** called MongoDB MCP tool `{tool}`.",
                                    agent=specialist, tool=tool)
                     yield _event("tool_call", agent=specialist, tool=tool)
+                elif ev.type == "reasoning":
+                    # Live reasoning token chunk — forward for progressive rendering.
+                    yield _event("reasoning", agent=specialist, text=ev.data.get("text", ""))
+                elif ev.type == "delta":
+                    # Live answer token chunk — forward for progressive rendering.
+                    yield _event("delta", agent=specialist, text=ev.data.get("text", ""))
                 elif ev.type == "message":
                     answers[specialist] = ev.data.get("text", "")
                     if trace is not None:
@@ -258,11 +381,20 @@ def _run_turn(
     # No specialist selected → orchestrator replies directly (greeting / capability / clarify).
     if not cls.specialists:
         yield _event("direct")
-        reply = _direct_reply(message, history, facts)
+        parts: list[str] = []
+        try:
+            for piece in _direct_reply_stream(message, history, facts):
+                if piece:
+                    parts.append(piece)
+                    yield _event("delta", agent="orchestrator", text=piece)
+        except Exception as e:  # noqa: BLE001 — fall back to a single non-streamed reply
+            logger.warning("Direct reply streaming failed (%s); falling back.", e)
+            parts = []
+        reply = "".join(parts) or _direct_reply(message, history, facts)
         if trace is not None:
             trace.step("direct reply", "Orchestrator answered directly (no specialist).")
             trace.final = reply
-        yield _event("final", text=reply)
+        yield _event("final", text=reply, streamed=bool(parts))
         _persist(session_id, user_id, message, reply)
         return
 
@@ -272,10 +404,15 @@ def _run_turn(
     # A single specialist runs inline (no thread overhead); 2+ fan out over threads so the
     # slower one (career-coach's MCP tool loop) doesn't serialize behind the faster one.
     answers: dict[str, str] = {}
+    # `streamed` is True when the final answer text already reached the client live via `delta`
+    # events (single specialist). For synthesis (2 specialists) the merged reply differs from the
+    # streamed deltas, so it is NOT considered pre-streamed and the UI must render it fresh.
+    streamed = False
     if len(cls.specialists) == 1:
         specialist = cls.specialists[0]
         for ev in _run_specialist(reg, specialist, message, history, facts, answers, trace):
             yield ev
+        streamed = bool(answers)
     else:
         yield from _fan_out_specialists(
             reg, cls.specialists, message, history, facts, answers, trace
@@ -283,6 +420,7 @@ def _run_turn(
 
     if not answers:
         final = "Sorry — I couldn't produce an answer this time. Please try rephrasing."
+        streamed = False
     elif len(answers) == 1:
         final = next(iter(answers.values()))
     else:
@@ -292,10 +430,21 @@ def _run_turn(
                        f"Merged {len(answers)} specialist answers into one reply via the "
                        "synthesizer LLM.", agents=list(answers.keys()))
         final = _synthesize(message, answers)
+        streamed = False
 
     if trace is not None:
         trace.final = final
-    yield _event("final", text=final)
+        # Verify the answer only cites rows it was actually given (invalid ids = invented source).
+        supplied = [h for r in trace.retrievals for h in r.get("hits", [])]
+        trace.citations = _check_citations(final, supplied)
+        if trace.citations["invalid"]:
+            logger.warning(
+                "Ungrounded citation(s) %s in session %s", trace.citations["invalid"], session_id
+            )
+            trace.step("citation check",
+                       f"Answer cited unknown grounding id(s): "
+                       f"{', '.join(trace.citations['invalid'])}.")
+    yield _event("final", text=final, streamed=streamed)
     _persist(session_id, user_id, message, final)
 
 
@@ -329,9 +478,11 @@ def _save_trace(session_id: str, user_id: str, trace: "_Trace", record: dict[str
             "routing": trace.routing,
             "specialists": trace.specialists,
             "reasoning": trace.reasoning,
+            "reasoning_text": trace.reasoning_text,
             "tool_calls": trace.tool_calls,
             "retrievals": trace.retrievals,
             "memory": trace.memory,
+            "citations": trace.citations,
             "events": trace.events,
             "tokens": tokens,
             "cost_usd": _estimate_cost(tokens),

@@ -4,7 +4,7 @@ description: >
   Triage agent for the Career Assistant. Understands the user's intent and routes to the
   right specialist(s): job matching, career coaching, or company intelligence. Handles
   greetings and clarifying questions itself; delegates anything substantive.
-model: gpt-4o
+model: gpt-5.6-sol
 tools: []
 collections: []
 routable: false

@@ -123,10 +123,7 @@ if $KEEP_RG; then
   # Container Apps environment
   az containerapp env delete -g "$RG" -n "${PREFIX}-cae" --yes -o none 2>/dev/null \
     && echo "   deleted env ${PREFIX}-cae" || true
-  # Function app + plan + storage
-  az functionapp delete -g "$RG" -n "${PREFIX}-embed-func" -o none 2>/dev/null \
-    && echo "   deleted function ${PREFIX}-embed-func" || true
-  az appservice plan delete -g "$RG" -n "${PREFIX}-embed-func-plan" --yes -o none 2>/dev/null || true
+  # (The embedding Function App was removed in specs/002 — nothing to delete.)
   # Log Analytics + App Insights
   az monitor app-insights component delete -g "$RG" --app "${PREFIX}-appi" -o none 2>/dev/null || true
   az monitor log-analytics workspace delete -g "$RG" -n "${PREFIX}-logs" --yes --force true -o none 2>/dev/null || true

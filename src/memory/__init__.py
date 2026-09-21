@@ -1,70 +1,62 @@
-"""Conversation memory backed by MongoDB.
+"""Conversation memory facade (specs/001-foundry-short-term-memory).
 
-Two layers, mirroring the reference's AgentCore Memory:
-  - short-term : per-session chat turns in `chat_messages` (session-isolated, ordered).
-  - long-term  : durable user facts in `agent_memory_facts`, extracted from turns by an LLM.
+Layers:
+  - short-term : per-session chat history, backend-selected by SHORT_TERM_MEMORY_BACKEND
+                 (`mongo` → `chat_messages`, the original; `foundry` → Foundry
+                 Conversations). R1: callers see one unchanged API.
+  - long-term  : durable user facts in `agent_memory_facts`, LLM-extracted per turn
+                 (unchanged, Atlas — R5).
+  - traces     : per-turn audit records in `agent_traces` (unchanged, Atlas — R6).
+  - sessions   : `chat_sessions` metadata maintained by BOTH backends so `list_sessions`
+                 works regardless of the active backend (R4).
 
-The host orchestrator uses plain **pymongo** (synchronous, simple to weave into the request
-flow) so the Foundry-hosted specialists and the orchestrator share one memory store.
+Callers (`orchestrator.py`, `agent_host.py`, `app.py`) import this module as before:
+    from . import memory
 """
 from __future__ import annotations
 
 import datetime as dt
 from typing import Any
 
-from pymongo import ASCENDING, MongoClient
+from pymongo import ASCENDING
 
-from .llm import chat_json
-from .settings import get_settings
+from ..llm import chat_json
+from ..settings import get_settings
+from . import _mongo, _shared
 
-CHAT_COLLECTION = "chat_messages"
-FACTS_COLLECTION = "agent_memory_facts"
-TRACES_COLLECTION = "agent_traces"
-MAX_HISTORY = 20
+# Public constants (unchanged import surface — also used by tests/integration).
+CHAT_COLLECTION = _shared.CHAT_COLLECTION
+FACTS_COLLECTION = _shared.FACTS_COLLECTION
+TRACES_COLLECTION = _shared.TRACES_COLLECTION
+SESSIONS_COLLECTION = _shared.SESSIONS_COLLECTION
+MAX_HISTORY = _shared.MAX_HISTORY
 
-_client: MongoClient | None = None
-
-
-def _db():
-    global _client
-    if _client is None:
-        s = get_settings()
-        s.require("mongodb_uri")
-        _client = MongoClient(s.mongodb_uri)
-    return _client[get_settings().mongodb_db]
+# Backwards-compatible seam (live tests use memory._db(); unit tests patch
+# src.memory._shared._db, which this alias points at).
+_db = _shared._db
 
 
-def _now() -> dt.datetime:
-    return dt.datetime.now(dt.timezone.utc)
+def _history_backend():
+    """Dispatch short-term history to the configured backend (R3)."""
+    if get_settings().short_term_memory_backend == "foundry":
+        from . import _foundry  # lazy: azure-ai-projects is an optional (foundry) dep
+
+        return _foundry
+    return _mongo
 
 
 # --------------------------------------------------------------------------- #
-# Short-term history
+# Short-term history (backend-dispatched)
 # --------------------------------------------------------------------------- #
 def append_message(
     session_id: str, role: str, content: str, agent: str | None = None,
     user_id: str | None = None,
 ) -> None:
-    _db()[CHAT_COLLECTION].insert_one(
-        {
-            "session_id": session_id,
-            "user_id": user_id,
-            "role": role,
-            "content": content,
-            "agent": agent,
-            "ts": _now(),
-        }
-    )
+    _history_backend().append_message(session_id, role, content, agent=agent, user_id=user_id)
 
 
 def get_history(session_id: str, limit: int = MAX_HISTORY) -> list[dict[str, Any]]:
-    cur = (
-        _db()[CHAT_COLLECTION]
-        .find({"session_id": session_id}, {"_id": 0, "role": 1, "content": 1, "agent": 1, "ts": 1})
-        .sort("ts", ASCENDING)
-    )
-    msgs = list(cur)
-    return msgs[-limit:]
+    return _history_backend().get_history(session_id, limit)
 
 
 def history_as_text(session_id: str, limit: int = MAX_HISTORY) -> str:
@@ -72,20 +64,44 @@ def history_as_text(session_id: str, limit: int = MAX_HISTORY) -> str:
     return "\n".join(lines)
 
 
+# --------------------------------------------------------------------------- #
+# Session listing (backend-agnostic: chat_sessions metadata + trace stats — R4)
+# --------------------------------------------------------------------------- #
+_EPOCH = dt.datetime.min.replace(tzinfo=dt.timezone.utc)
+
+
 def list_sessions() -> list[dict[str, Any]]:
-    """List sessions with turn counts, last-activity, and aggregate token/cost/latency from traces."""
-    pipeline = [
+    """List sessions with turn counts, last-activity, and aggregate token/cost/latency.
+
+    Response shape is unchanged from the pre-split implementation (AC2). Membership is
+    the union of legacy `chat_messages`-derived sessions (pre-`chat_sessions` data and
+    the mongo backend) and `chat_sessions` metadata (both backends); trace aggregates
+    still come from `agent_traces`.
+    """
+    db = _shared._db()
+    by_id: dict[str, dict[str, Any]] = {}
+    for s in db[CHAT_COLLECTION].aggregate([
         {"$group": {"_id": "$session_id", "messages": {"$sum": 1}, "last": {"$max": "$ts"},
                     "first": {"$min": "$ts"}, "user_id": {"$last": "$user_id"}}},
-        {"$sort": {"last": -1}},
-        {"$limit": 200},
-    ]
-    sessions = list(_db()[CHAT_COLLECTION].aggregate(pipeline))
+    ]):
+        by_id[s["_id"]] = {
+            "session_id": s["_id"], "user_id": s.get("user_id"),
+            "messages": s.get("messages", 0), "first": s.get("first"), "last": s.get("last"),
+        }
+    for d in db[SESSIONS_COLLECTION].find({}, {"_id": 0}):
+        sid = d["session_id"]
+        entry = by_id.get(sid) or {"session_id": sid}
+        entry.update({
+            "user_id": d.get("user_id") or entry.get("user_id"),
+            "messages": max(d.get("messages", 0), entry.get("messages", 0)),
+            "first": d.get("first_ts") or entry.get("first"),
+            "last": d.get("last_ts") or entry.get("last"),
+        })
+        by_id[sid] = entry
 
-    # Aggregate trace stats per session (turns, tokens, cost, latency, tool calls).
     trace_stats = {
         d["_id"]: d
-        for d in _db()[TRACES_COLLECTION].aggregate([
+        for d in db[TRACES_COLLECTION].aggregate([
             {"$group": {
                 "_id": "$session_id",
                 "turns": {"$sum": 1},
@@ -98,8 +114,11 @@ def list_sessions() -> list[dict[str, Any]]:
         ])
     }
     out = []
-    for s in sessions:
-        sid = s["_id"]
+    ordered = sorted(
+        by_id.values(), key=lambda s: s.get("last") or _EPOCH, reverse=True
+    )[:200]
+    for s in ordered:
+        sid = s["session_id"]
         ts = trace_stats.get(sid, {})
         out.append({
             "session_id": sid,
@@ -118,18 +137,18 @@ def list_sessions() -> list[dict[str, Any]]:
 
 
 # --------------------------------------------------------------------------- #
-# Agent traces (per-turn, for the Sessions detail view)
+# Agent traces (per-turn, for the Sessions detail view) — unchanged, Atlas (R6)
 # --------------------------------------------------------------------------- #
 def save_trace(session_id: str, user_id: str, trace: dict[str, Any]) -> None:
     """Persist one turn's full trace (events, reasoning, retrieval, tokens, cost, tools)."""
-    doc = {"session_id": session_id, "user_id": user_id, "ts": _now(), **trace}
-    _db()[TRACES_COLLECTION].insert_one(doc)
+    doc = {"session_id": session_id, "user_id": user_id, "ts": _shared._now(), **trace}
+    _shared._db()[TRACES_COLLECTION].insert_one(doc)
 
 
 def get_traces(session_id: str, limit: int = 100) -> list[dict[str, Any]]:
     """Return all persisted turn traces for a session, oldest first (JSON-safe)."""
     cur = (
-        _db()[TRACES_COLLECTION]
+        _shared._db()[TRACES_COLLECTION]
         .find({"session_id": session_id}, {"_id": 0})
         .sort("ts", ASCENDING)
         .limit(limit)
@@ -144,11 +163,11 @@ def get_traces(session_id: str, limit: int = 100) -> list[dict[str, Any]]:
 
 
 # --------------------------------------------------------------------------- #
-# Long-term facts
+# Long-term facts — unchanged, Atlas (R5)
 # --------------------------------------------------------------------------- #
 def get_facts(user_id: str, limit: int = 20) -> list[dict[str, Any]]:
     cur = (
-        _db()[FACTS_COLLECTION]
+        _shared._db()[FACTS_COLLECTION]
         .find({"user_id": user_id}, {"_id": 0, "fact": 1, "kind": 1, "ts": 1})
         .sort("ts", ASCENDING)
     )
@@ -160,7 +179,7 @@ def facts_as_text(user_id: str, limit: int = 20) -> str:
 
 
 def _dedupe_store_facts(user_id: str, facts: list[dict[str, str]]) -> int:
-    coll = _db()[FACTS_COLLECTION]
+    coll = _shared._db()[FACTS_COLLECTION]
     stored = 0
     for f in facts:
         fact = (f.get("fact") or "").strip()
@@ -170,7 +189,7 @@ def _dedupe_store_facts(user_id: str, facts: list[dict[str, str]]) -> int:
         res = coll.update_one(
             {"user_id": user_id, "fact": fact},
             {"$setOnInsert": {"user_id": user_id, "fact": fact,
-                              "kind": f.get("kind", "general"), "ts": _now()}},
+                              "kind": f.get("kind", "general"), "ts": _shared._now()}},
             upsert=True,
         )
         if res.upserted_id is not None:
@@ -202,6 +221,9 @@ def extract_and_store_facts(user_id: str, user_message: str, assistant_message: 
 
 def ensure_indexes() -> None:
     """Create the supporting indexes for memory collections (idempotent)."""
-    _db()[CHAT_COLLECTION].create_index([("session_id", ASCENDING), ("ts", ASCENDING)])
-    _db()[FACTS_COLLECTION].create_index([("user_id", ASCENDING), ("fact", ASCENDING)], unique=True)
-    _db()[TRACES_COLLECTION].create_index([("session_id", ASCENDING), ("ts", ASCENDING)])
+    db = _shared._db()
+    db[CHAT_COLLECTION].create_index([("session_id", ASCENDING), ("ts", ASCENDING)])
+    db[FACTS_COLLECTION].create_index([("user_id", ASCENDING), ("fact", ASCENDING)], unique=True)
+    db[TRACES_COLLECTION].create_index([("session_id", ASCENDING), ("ts", ASCENDING)])
+    db[SESSIONS_COLLECTION].create_index([("session_id", ASCENDING)], unique=True)
+    db[SESSIONS_COLLECTION].create_index([("last_ts", ASCENDING)])

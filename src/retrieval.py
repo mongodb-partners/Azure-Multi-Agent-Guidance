@@ -10,18 +10,52 @@ in Python where we can port it faithfully.
 """
 from __future__ import annotations
 
+import logging
 import math
 from dataclasses import dataclass, field
 from typing import Any
 
 from pymongo import MongoClient
 
-from .embeddings import embed_text
+from .embeddings import AUTO_EMBED_TEXT_FIELD, embed_text
 from .settings import get_settings
+
+logger = logging.getLogger(__name__)
 
 RRF_K = 60
 MMR_LAMBDA = 0.7
 RECENCY_HALFLIFE_DAYS = 90.0
+
+# Per-provider relevance-floor defaults (specs/002 R7). Calibrated on the seeded demo
+# corpus; None = uncalibrated provider → floor disabled (with a one-time warning) until
+# `python -m scripts.calibrate_retrieval_floor` is run for that provider.
+FLOOR_DEFAULTS: dict[str, float | None] = {
+    "foundry": 0.60,
+    "voyage": None,
+    "atlas_auto": None,
+}
+_floor_warned = False
+
+
+def resolve_min_score() -> float | None:
+    """Resolve the relevance floor: explicit RETRIEVAL_MIN_SCORE > provider default.
+
+    None means "no filtering" — every retrieved row is offered as grounding.
+    """
+    global _floor_warned
+    s = get_settings()
+    if s.retrieval_min_score is not None:
+        return s.retrieval_min_score
+    floor = FLOOR_DEFAULTS.get(s.embedding_provider)
+    if floor is None and not _floor_warned:
+        _floor_warned = True
+        logger.warning(
+            "No calibrated relevance floor for EMBEDDING_PROVIDER=%s — retrieval floor "
+            "disabled. Run `python -m scripts.calibrate_retrieval_floor` and set "
+            "RETRIEVAL_MIN_SCORE.", s.embedding_provider,
+        )
+    return floor
+
 
 _client: MongoClient | None = None
 
@@ -41,24 +75,42 @@ class RetrievalConfig:
     vector_index: str = "vector_index"
     search_index: str = "search_index"
     embedding_field: str = "embedding"
+    # Text field the auto-embed index targets (EMBEDDING_PROVIDER=atlas_auto only).
+    auto_embed_field: str = AUTO_EMBED_TEXT_FIELD
     text_fields: list[str] = field(default_factory=lambda: ["title", "description"])
     projection: dict[str, int] | None = None
     recency_field: str | None = None  # e.g. "posted_at" for jobs
 
 
-def _vector_search(cfg: RetrievalConfig, query_vec: list[float], k: int) -> list[dict[str, Any]]:
-    pipeline = [
-        {
-            "$vectorSearch": {
-                "index": cfg.vector_index,
-                "path": cfg.embedding_field,
-                "queryVector": query_vec,
-                "numCandidates": max(k * 10, 100),
-                "limit": k,
-            }
-        },
-        {"$addFields": {"_vs_score": {"$meta": "vectorSearchScore"}}},
-    ]
+def _vector_stage(cfg: RetrievalConfig, query_vec: list[float], k: int) -> dict[str, Any]:
+    """$vectorSearch stage for client-embedded providers (foundry/voyage). Pure builder."""
+    return {
+        "$vectorSearch": {
+            "index": cfg.vector_index,
+            "path": cfg.embedding_field,
+            "queryVector": query_vec,
+            "numCandidates": max(k * 10, 100),
+            "limit": k,
+        }
+    }
+
+
+def _auto_embed_stage(cfg: RetrievalConfig, query: str, k: int) -> dict[str, Any]:
+    """$vectorSearch stage for Atlas Automated Embedding: raw query text, Atlas embeds
+    it with the index's declared model (specs/002 R3). Pure builder."""
+    return {
+        "$vectorSearch": {
+            "index": cfg.vector_index,
+            "path": cfg.auto_embed_field,
+            "query": query,
+            "numCandidates": max(k * 10, 100),
+            "limit": k,
+        }
+    }
+
+
+def _vector_search(cfg: RetrievalConfig, stage: dict[str, Any], k: int) -> list[dict[str, Any]]:
+    pipeline = [stage, {"$addFields": {"_vs_score": {"$meta": "vectorSearchScore"}}}]
     if cfg.projection:
         proj = dict(cfg.projection)
         proj["_vs_score"] = 1
@@ -172,9 +224,20 @@ def hybrid_search(
     top_n: int = 5,
     pool: int = 50,
 ) -> list[dict[str, Any]]:
-    """Full hybrid pipeline: vector + BM25 → RRF → recency → MMR. Returns top_n docs."""
-    query_vec = embed_text(query)
-    vhits = _vector_search(cfg, query_vec, pool)
+    """Full hybrid pipeline: vector + BM25 → RRF → recency → MMR. Returns top_n docs.
+
+    Under EMBEDDING_PROVIDER=atlas_auto (specs/002 R3): Atlas embeds the query text
+    server-side (no client-side embedding), and MMR is skipped because source documents
+    carry no embedding vectors to diversify against (spec R-Q5) — RRF + recency ordering.
+    """
+    if get_settings().embedding_provider == "atlas_auto":
+        vhits = _vector_search(cfg, _auto_embed_stage(cfg, query, pool), pool)
+        thits = _text_search(cfg, query, pool)
+        fused = _apply_recency(_rrf_fuse(vhits, thits), cfg)
+        return fused[:top_n]
+
+    query_vec = embed_text(query, input_type="query")
+    vhits = _vector_search(cfg, _vector_stage(cfg, query_vec, pool), pool)
     thits = _text_search(cfg, query, pool)
     fused = _rrf_fuse(vhits, thits)
     fused = _apply_recency(fused, cfg)

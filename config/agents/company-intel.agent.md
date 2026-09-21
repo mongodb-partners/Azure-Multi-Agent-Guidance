@@ -4,7 +4,7 @@ description: >
   Employer research: culture, mission, funding/size, tech stack, locations, and reputation.
   Use for "tell me about <company>", "what's it like to work at X", "is X well funded",
   "compare company A and B". Replaces the reference's Bedrock Knowledge Base with Atlas vector search.
-model: gpt-4o
+model: gpt-5.6-sol
 tools:
   - mongodb_find
   - mongodb_aggregate
