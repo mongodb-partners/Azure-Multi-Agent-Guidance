@@ -46,13 +46,27 @@ This demo assumes **you** have already provisioned:
 > they call the MCP over Streamable HTTP at `<fqdn>/mcp` and (for external ingress) send a shared
 > **API-key header**. For **local dev**, run the MCP in Docker and point `MONGODB_MCP_URL` at it:
 > ```bash
-> docker run --rm -p 3000:3000 \
+> docker run --rm -p 3001:3000 \
 >   -e MDB_MCP_CONNECTION_STRING="$MONGODB_URI" \
 >   -e MDB_MCP_TRANSPORT=http -e MDB_MCP_HTTP_HOST=0.0.0.0 -e MDB_MCP_HTTP_PORT=3000 \
 >   -e MDB_MCP_READ_ONLY=true \
+>   -e MDB_MCP_DANGEROUS_HOST_BINDING=true \
 >   mongodb/mongodb-mcp-server:latest
-> # then set MONGODB_MCP_URL=http://localhost:3000/mcp in .env
+> # then set MONGODB_MCP_URL=http://localhost:3001/mcp in .env
 > ```
+>
+> > Notes (from the specs/006 QA cycle):
+> > - **Port**: use host port **3001** for the local MCP — the API defaults to `PORT=3000` and
+> >   would collide with a `-p 3000:3000` mapping.
+> > - **`MDB_MCP_DANGEROUS_HOST_BINDING=true`** is required by current `mongodb-mcp-server`
+> >   images (v3.x): the server refuses to bind `0.0.0.0` without it. Safe here — Docker's port
+> >   mapping is what actually exposes it, to localhost only.
+> > - **Registered Foundry agents cannot reach a localhost MCP** — Foundry runs in Azure and its
+> >   outbound SSRF protection blocks loopback/private URLs. For local runs either use
+> >   `SPECIALIST_MODE=inline`, or point `MONGODB_MCP_URL` at the **deployed cloud MCP**
+> >   (from `.env.live`) with `MCP_API_KEY` set **and** a Foundry project connection holding the
+> >   API-key header (`MCP_CONNECTION_ID`, e.g. a CustomKeys connection named `mongodb-mcp`) —
+> >   Foundry rejects raw auth headers on registered MCP tools.
 
 ---
 
@@ -72,6 +86,9 @@ python -m db_seeding.seed_all
 # 2) Register the specialists on the Foundry Agent Service (idempotent)
 python -m scripts.provision_agents verify   # confirm the resource accepts agent ops
 python -m scripts.provision_agents sync      # create/update the routable specialists
+# NOTE: sync hashes the agent INSTRUCTIONS only — after changing MONGODB_MCP_URL / MCP_API_KEY /
+# MCP_CONNECTION_ID, run `python -m scripts.provision_agents sync --force` to push the new tool
+# config (known limitation D7, specs/006).
 
 # 3) Run the API (FastAPI + SSE) and the UI
 uvicorn src.app:app --reload --port ${PORT:-3000}
@@ -264,9 +281,34 @@ RUN_E2E=1 API_URL=<url> pytest -m e2e     # SSE contract against a running API
 ```
 
 - **unit** (`tests/unit/`) — offline, always run: classifier, orchestrator, retrieval math, memory, mcp_client, settings, telemetry.
+  ⚠️ The unit suite currently reads your local `.env` (defect D3, specs/006) — if your `.env`
+  deviates from defaults, either run with defaults overridden
+  (`MONGODB_ALLOW_WRITE=false SHORT_TERM_MEMORY_BACKEND=mongo EMBEDDING_PROVIDER=foundry pytest -m unit`)
+  or expect env-dependent failures.
 - **integration** (`tests/integration/`) — gated by `RUN_INTEGRATION=1` (hits live backends).
+  Requires a calibrated `RETRIEVAL_MIN_SCORE` for the active `EMBEDDING_PROVIDER`
+  (`python -m scripts.calibrate_retrieval_floor`), or the off-corpus grounding test fails.
 - **e2e** (`tests/e2e/`) — gated by `RUN_E2E=1` + `API_URL` (SSE stream against a running API).
 - **smoke** (`smoke/post_deploy_smoke.py`) — run automatically by `deploy.sh`; checks `/health`, `/agents`, and a live `/chat` turn.
+
+### QA / UAT
+
+A full QA & UAT cycle — 78 scenarios across environment validation, offline QA, live integration,
+API/SSE contract, functional agent behaviour, negative/edge cases, UI UAT, cloud deployment smoke,
+and observability — was executed on 2026-09-22 against both the local setup and the deployed Azure
+Container Apps stack. **Result: PASS WITH DEFECTS** (61 pass / 7 fail / 1 blocked / 1 N/A).
+Full input/expected/actual results, evidence, and the defect log:
+**[specs/006-qa-uat-plan/qa-uat-report.md](specs/006-qa-uat-plan/qa-uat-report.md)**.
+
+Open defects worth knowing before demoing (details + reproduction in the report):
+
+| ID | Severity | Summary |
+|---|---|---|
+| D10 | Major | Atlas outage truncates the `/chat` SSE stream (no `error`/`final`/`done` sent) |
+| D9 | Major | In-session conversational recall can fail when a follow-up is misrouted to a grounded specialist |
+| D8 | Minor | Small talk / capability questions route to a specialist instead of a direct orchestrator reply |
+| D7 | Major | `provision_agents sync` doesn't detect MCP tool-config changes (use `--force`) |
+| D3 | Major | Unit suite is not isolated from the developer's `.env` |
 
 ---
 
