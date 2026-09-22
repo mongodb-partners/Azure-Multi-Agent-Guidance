@@ -44,3 +44,5 @@ specs/<NNN>-<slug>/
 | 002 | [Configurable embedding provider](002-configurable-embedding-provider/spec.md) | implemented |
 | 003 | [Self-contained Azure provisioning](003-self-contained-azure-provisioning/spec.md) | abandoned |
 | 004 | [Live reasoning streaming — direct replies and registered/inline parity](004-live-reasoning-streaming/spec.md) | implemented |
+| 005 | [Developer trace — raw SSE event JSON in the chat UI](005-developer-trace-raw-events/spec.md) | abandoned |
+| 006 | [QA & UAT plan](006-qa-uat-plan/spec.md) ([report](006-qa-uat-plan/qa-uat-report.md)) | approved |

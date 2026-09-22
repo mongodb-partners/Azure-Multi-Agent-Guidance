@@ -90,3 +90,21 @@ def test_save_and_get_traces_roundtrip(fake_db):
     assert traces[0]["user_message"] == "hi"
     assert traces[0]["reasoning"][0]["step"] == "route"
     assert isinstance(traces[0]["ts"], str)  # JSON-safe
+
+
+def test_get_traces_deep_json_safe_with_nested_objectid(fake_db):
+    """Regression: retrieval hits embed raw docs whose `_id` is an ObjectId — the
+    /sessions/{id}/traces endpoint must still serialize (was a 500 via FastAPI's encoder)."""
+    import json
+
+    from bson import ObjectId
+
+    oid = ObjectId()
+    memory.save_trace("s10", "u9", {
+        "user_message": "q", "final": "a",
+        "retrievals": [{"agent": "job-match", "hits": [{"_id": oid, "title": "x"}]}],
+        "tool_calls": [], "events": [], "tokens": {"total": 1}, "cost_usd": 0.0,
+    })
+    traces = memory.get_traces("s10")
+    assert traces[0]["retrievals"][0]["hits"][0]["_id"] == str(oid)
+    json.dumps(traces)  # must not raise — no default=str crutch

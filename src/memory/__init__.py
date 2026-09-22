@@ -145,6 +145,24 @@ def save_trace(session_id: str, user_id: str, trace: dict[str, Any]) -> None:
     _shared._db()[TRACES_COLLECTION].insert_one(doc)
 
 
+def _json_safe(value: Any) -> Any:
+    """Recursively coerce non-JSON types (BSON ObjectId, datetimes) to strings.
+
+    Trace docs embed raw retrieval hits, whose `_id`s are ObjectIds — the FastAPI
+    response encoder rejects them, so the /sessions/{id}/traces endpoint 500s without
+    this. (The SSE path never hits it: it serializes with `json.dumps(default=str)`.)
+    """
+    if isinstance(value, dict):
+        return {k: _json_safe(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(v) for v in value]
+    if hasattr(value, "isoformat"):
+        return value.isoformat()
+    if type(value).__module__.startswith("bson"):
+        return str(value)
+    return value
+
+
 def get_traces(session_id: str, limit: int = 100) -> list[dict[str, Any]]:
     """Return all persisted turn traces for a session, oldest first (JSON-safe)."""
     cur = (
@@ -153,13 +171,7 @@ def get_traces(session_id: str, limit: int = 100) -> list[dict[str, Any]]:
         .sort("ts", ASCENDING)
         .limit(limit)
     )
-    out = []
-    for d in cur:
-        ts = d.get("ts")
-        if hasattr(ts, "isoformat"):
-            d["ts"] = ts.isoformat()
-        out.append(d)
-    return out
+    return [_json_safe(d) for d in cur]
 
 
 # --------------------------------------------------------------------------- #
