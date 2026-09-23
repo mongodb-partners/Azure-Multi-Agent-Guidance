@@ -73,7 +73,7 @@ This demo assumes **you** have already provisioned:
 ## Quick start (local)
 
 ```bash
-cd mongodb-multiagent-foundry
+cd multi-agent-using-mongodb-for-hyperscaler
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt -r requirements-foundry.txt
 
@@ -134,7 +134,7 @@ flowchart TB
         ORCHA["orchestrator (hosted, optional)"]
     end
 
-    subgraph ACA["Azure Container Apps"]
+    subgraph ACA["Azure Container Apps (hosts API · UI · MCP)"]
         MCP["Self-hosted MongoDB MCP<br/>mongodb/mongodb-mcp-server<br/>/mcp · API-key header · read-only"]
     end
 
@@ -146,6 +146,7 @@ flowchart TB
         AOAI["Azure OpenAI<br/>gpt-5.6-sol · text-embedding-3-large"]
         KV["Key Vault<br/>mongo-uri · aoai-key · mcp-api-key"]
         AI["App Insights /<br/>Azure Monitor"]
+        ACR["Container Registry (ACR)<br/>career-api · career-ui · career-hosted images"]
     end
 
     UI -->|HTTP| CHAT
@@ -160,6 +161,38 @@ flowchart TB
     MCP -.->|mongo-uri secret| KV
     TEL -.-> AI
     ORCHA -->|cross-agent| SPEC
+    ACR -.->|image pull| ACA
+```
+
+### A chat turn, end to end
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant U as Streamlit UI
+    participant API as FastAPI /chat (SSE)
+    participant O as orchestrator.run_turn
+    participant ATLAS as MongoDB Atlas
+    participant AOAI as Azure OpenAI
+    participant F as Foundry Agent Service
+    participant MCP as mongodb-mcp-server
+
+    U->>API: POST /chat {message, session_id, user_id}
+    API->>O: run_turn
+    O->>ATLAS: load short-term history + long-term facts
+    O->>AOAI: classify (heuristic first, LLM tie-break)
+    AOAI-->>O: routing decision
+    O->>ATLAS: hybrid retrieval ($vectorSearch + $search → RRF → recency → MMR)
+    O->>F: invoke specialist(s) by reference (registered) or inline Responses
+    F->>MCP: mcp tool call (X-MCP-Api-Key header)
+    MCP->>ATLAS: find/aggregate (preconfigured connection)
+    ATLAS-->>MCP: documents
+    MCP-->>F: tool result
+    F-->>O: specialist answer + tool-call trace
+    O->>AOAI: synthesize (only when 2 specialists answered)
+    O-->>API: SSE events: routing · retrieval · reasoning · delta · final · usage · done
+    API-->>U: streamed tokens + live trace
+    O->>ATLAS: append chat_messages · agent_traces · extracted memory facts
 ```
 
 ### Orchestration
@@ -220,6 +253,19 @@ cd deploy
 ./deploy.sh <resource-group> <location>   # e.g. ./deploy.sh mdb-maf-demo eastus
 ```
 
+```mermaid
+flowchart LR
+    SH["deploy/deploy.sh"] --> RG["resource group"]
+    SH --> ACR["create ACR +<br/>az acr build<br/>career-api · career-ui"]
+    SH --> KV["keyvault.bicep<br/>vault + UAMI + RBAC"]
+    SH --> PUSH["az keyvault secret set<br/>aoai-key · mongodb-uri · mcp-api-key (+ voyage-api-key)"]
+    KV --> PUSH
+    PUSH --> MAIN["main.bicep<br/>Log Analytics · App Insights · CA env<br/>mcp.bicep → MCP app<br/>API + UI apps (KV secret refs)<br/>monitoring.bicep → workbook + 5 alerts"]
+    ACR --> MAIN
+    MAIN --> LIVE["write .env.live<br/>(apiUrl · uiUrl · mcpUrl)"]
+    LIVE --> SMOKE["smoke/post_deploy_smoke.py<br/>/health · /agents · live /chat turn"]
+```
+
 Provisions (via `main.bicep` + `keyvault.bicep` + `mcp.bicep` + `monitoring.bicep`): a Log Analytics
 workspace, Application Insights, a Container Apps environment, ACR, Key Vault + a user-assigned managed
 identity, the **self-hosted MongoDB MCP Container App**, and the API + UI
@@ -244,7 +290,7 @@ OpenTelemetry distro (`src/telemetry.py`). Spans cover `chat.turn` → classify 
 → synthesize, plus auto-instrumented FastAPI/httpx/pymongo. Custom metrics: `chat.turns`,
 `chat.errors`, `chat.latency_ms`, `specialist.invocations`, `tool.calls`, `llm.tokens`.
 
-`monitoring.bicep` provisions an Ops **workbook** and 6 alerts (API 5xx, p95 latency, container
+`monitoring.bicep` provisions an Ops **workbook** and 5 alerts (API 5xx, p95 latency, container
 restarts, chat-error rate, token-budget). Enable export by setting
 `APPLICATIONINSIGHTS_CONNECTION_STRING` (set automatically in the cloud stack); everything no-ops
 cleanly when it's unset.
@@ -329,8 +375,24 @@ ui/               streamlit_app.py (chat + Usage&Cost sidebar) · theme.py (Mong
 tests/            unit/ (offline) · integration/ · e2e/ · conftest.py    smoke/ post-deploy check
 deploy/           main.bicep, keyvault.bicep, mcp.bicep, monitoring.bicep, Dockerfile.*, deploy.sh,
                   destroy.sh, provision_hosted.sh, provision_agents_hosted.sh
-docs/             foundry-agents.md, mcp-server.md, secrets.md, HARDENING-PLAN.md
+docs/             service-map.md, foundry-agents.md, mcp-server.md, memory.md, secrets.md,
+                  HARDENING-PLAN.md, Azure-Foundry-MultiAgent-Port-PLAN.md (historical)
 ```
+
+---
+
+## Documentation
+
+| Doc | Contents |
+|---|---|
+| [docs/service-map.md](docs/service-map.md) | What service is used where and how — per-service files, APIs, env vars |
+| [docs/foundry-agents.md](docs/foundry-agents.md) | The three Foundry-native consumption options (prompt agents, hosted agent, four hosted agents) |
+| [docs/mcp-server.md](docs/mcp-server.md) | Self-hosted MongoDB MCP server: auth header, safety defaults, local dev, troubleshooting |
+| [docs/memory.md](docs/memory.md) | Memory layers and the `mongo` vs `foundry` short-term backend (specs/001) |
+| [docs/secrets.md](docs/secrets.md) | Secret inventory, Key Vault model, rotation runbook |
+| [docs/HARDENING-PLAN.md](docs/HARDENING-PLAN.md) | Production hardening: what's done, what's open |
+| [docs/Azure-Foundry-MultiAgent-Port-PLAN.md](docs/Azure-Foundry-MultiAgent-Port-PLAN.md) | Historical: the original AWS→Azure port plan (implemented) |
+| [specs/README.md](specs/README.md) | Spec-driven development workflow + index of all specs |
 
 ---
 
@@ -354,9 +416,10 @@ See `deploy/destroy.sh --help` header for details.
 
 ## Secrets
 
-Secrets (Azure OpenAI key, Mongo URI, MCP API key) are stored in **Azure Key Vault** and read
-by the API + MCP + Function via a **user-assigned managed identity** (read-only `Key Vault Secrets
-User`) — no secret values land in container env or Bicep parameters. `deploy.sh` pushes the values
+Secrets (Azure OpenAI key, Mongo URI, MCP API key, optional Voyage key) are stored in
+**Azure Key Vault** and read by the API + MCP Container Apps via a **user-assigned managed
+identity** (read-only `Key Vault Secrets User`) — no secret values land in container env or
+Bicep parameters. `deploy.sh` pushes the values
 from your local `.env` (and the generated MCP API key) into Key Vault. See
 **[docs/secrets.md](docs/secrets.md)** for the rotation runbook.
 
@@ -411,6 +474,6 @@ See **[docs/HARDENING-PLAN.md](docs/HARDENING-PLAN.md)** for the sequenced remed
 ## Production hardening
 
 Done: **Key Vault** secret hardening · **destroy** tooling · **App Insights / Azure Monitor**
-observability (traces, metrics, workbook, 7 alerts) · **layered testing** (unit/integration/e2e/smoke).
+observability (traces, metrics, workbook, 5 alerts) · **layered testing** (unit/integration/e2e/smoke).
 Planned (see **[docs/HARDENING-PLAN.md](docs/HARDENING-PLAN.md)**): Private Endpoint / VNET to Atlas ·
 Entra ID JWT auth · rate limiting · CI/CD.

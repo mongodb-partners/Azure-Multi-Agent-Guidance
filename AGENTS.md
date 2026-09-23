@@ -20,6 +20,9 @@ This repo uses spec-driven development — see `specs/README.md`.
   criterion (`AC1`, …) in the spec.
 - If implementation deviates from an approved spec, update the spec in the same change.
 - Bug fixes, behavior-preserving refactors, and docs-only changes are exempt.
+- **Docs are part of the change.** Implementing a spec includes updating every doc its
+  contracts touch (`README.md`, `docs/*.md`) — env vars, ports, model/collection names,
+  commands, and diagrams must match the code (spec 007).
 
 ## Commands
 

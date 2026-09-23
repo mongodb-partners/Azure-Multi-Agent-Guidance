@@ -2,12 +2,17 @@
 
 This project uses these long-lived secrets:
 
-| Secret | Env var | Where it's used |
-|---|---|---|
-| Azure OpenAI API key | `AZURE_OPENAI_API_KEY` | `src/llm.py`, `src/embeddings.py` (provider=foundry) |
-| Voyage AI API key (only when `EMBEDDING_PROVIDER=voyage`) | `VOYAGE_API_KEY` | `src/embeddings.py` — Key Vault secret `voyage-api-key` |
-| MongoDB Atlas connection string (contains DB password) | `MONGODB_URI` | `src/memory.py`, `src/retrieval.py`, seeding |
-| Self-hosted MCP API key | `MCP_API_KEY` | `src/mcp_client.py` (API-key header to the MCP endpoint); the MCP container validates it via `MDB_MCP_HTTP_HEADERS` |
+| Secret | Env var | Key Vault secret (cloud) | Where it's used |
+|---|---|---|---|
+| Azure OpenAI API key | `AZURE_OPENAI_API_KEY` | `azure-openai-api-key` | `src/llm.py`, `src/embeddings.py` (provider=foundry) |
+| Voyage AI API key (only when `EMBEDDING_PROVIDER=voyage`) | `VOYAGE_API_KEY` | `voyage-api-key` | `src/embeddings.py` |
+| MongoDB Atlas connection string (contains DB password) | `MONGODB_URI` | `mongodb-uri` | `src/memory/`, `src/retrieval.py`, seeding, and the MCP container (`MDB_MCP_CONNECTION_STRING`) |
+| Self-hosted MCP API key | `MCP_API_KEY` | `mcp-api-key` | `src/mcp_client.py` (API-key header to the MCP endpoint); the MCP container validates it via `MDB_MCP_HTTP_HEADERS` |
+
+Consumers in the cloud stack: the **API** Container App (all four) and the **MCP** Container
+App (`mongodb-uri`, `mcp-api-key`) read them as Key Vault references via the user-assigned
+managed identity; Foundry **hosted agents** receive `MONGODB_MCP_URL`/`MCP_API_KEY` as
+container env via `scripts/provision_hosted.py`.
 
 Optional/derived: `MONGODB_MCP_URL` is an endpoint, not a secret. The MCP
 API key is a **static, long-lived** value (no token to refresh) — `deploy.sh` generates it and stores
@@ -103,14 +108,16 @@ az containerapp revision restart -g <rg> -n mdbmaf-api    # API re-reads MCP_API
 Implemented in `deploy/keyvault.bicep` + `deploy/main.bicep`:
 
 - Vault: `<prefix>-kv-<hash>` with RBAC authorization and 7-day soft-delete.
-- Secrets: `azure-openai-api-key`, `mongodb-uri`, `mcp-api-key`.
+- Secrets: `azure-openai-api-key`, `mongodb-uri`, `mcp-api-key`, and `voyage-api-key` when
+  `EMBEDDING_PROVIDER=voyage`.
 - The API + MCP Container Apps use a **user-assigned managed identity**
   (`<prefix>-id`) granted **`Key Vault Secrets User`** (read-only — least privilege; the previous
   read/write grant existed only for the removed Atlas MCP token broker). A user-assigned identity is
   used deliberately: it can be created and granted the role *before* the apps exist, avoiding the
   chicken-and-egg with Container App Key Vault references.
-- Container App secrets are **Key Vault references** (`keyVaultUrl` + `identity`),
-  the Function uses `@Microsoft.KeyVault(SecretUri=...)` app settings.
+- Container App secrets are **Key Vault references** (`keyVaultUrl` + `identity`). (There is
+  no Function App — it was removed in specs/002; the API calls the embedding provider
+  directly.)
 - `deploy/deploy.sh` pushes the secret values into Key Vault (`az keyvault secret
   set`) and passes only the **vault name** to Bicep — no secret values transit
   Bicep parameters or land in container env vars.

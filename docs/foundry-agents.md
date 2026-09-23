@@ -82,6 +82,26 @@ above) the app still runs by falling back to `SPECIALIST_MODE=inline`.
 
 ## Option 1 — Register the specialists as prompt agents
 
+```mermaid
+flowchart LR
+    CFG["config/agents/*.agent.md<br/>+ config/skills/*.skill.md"] --> CL["config_loader<br/>load_agents +<br/>build_agent_instructions<br/>(+ GROUNDING_RULES)"]
+    CL --> SYNC["scripts/provision_agents sync<br/>sha256 hash per agent"]
+    SYNC -->|unchanged| SKIP["skip (lock file<br/>foundry_agents.lock.json)"]
+    SYNC -->|changed / --force| CREATE["agents.create_version<br/>PromptAgentDefinition<br/>model + instructions + MCP tool"]
+    CREATE --> FA["Foundry prompt agents<br/>job-match · career-coach · company-intel"]
+    FA --> INVOKE["invoke by reference:<br/>get_openai_client(agent_name).responses.create"]
+    HOSTED["provision_hosted.sh /<br/>provision_agents_hosted.sh"] -.->|"HostedAgentDefinition<br/>(Options 2 & 3)"| FA2["Foundry hosted agents<br/>career-hosted-solution /<br/>one container per agent"]
+```
+
+> `orchestrator` is intentionally **not** registered as a prompt agent (`routable: false`) —
+> it runs host-side (in the FastAPI app or in a hosted container) and invokes the
+> specialists by reference.
+>
+> Model alignment: registered prompt agents use each agent config's `model`
+> (default `gpt-5.6-sol`); the host-side classifier/synthesizer/inline-fallback use
+> `AZURE_AI_MODEL_DEPLOYMENT_NAME` / `CLASSIFIER_MODEL_DEPLOYMENT`. Keep them aligned if you
+> want one model across the board.
+
 ```bash
 python -m scripts.provision_agents verify   # resource accepts agent ops?
 python -m scripts.provision_agents sync      # create/update the 3 routable specialists
@@ -266,26 +286,16 @@ curl -N -X POST localhost:8088/responses -H 'Content-Type: application/json' \
 | `src/config_loader.py` (`GROUNDING_RULES`) | The strict MongoDB-only grounding contract injected into every agent. |
 | `config/foundry_agents.lock.json` | Generated idempotency store for prompt-agent versions. |
 
-## Current deployed state (project `azure-multiagent-proj`)
+## Checking live deployed state
 
-Verified live and `ACTIVE` on this project:
+This doc intentionally does not snapshot a deployed state — it goes stale on every redeploy.
+To see what is actually registered on your Foundry project:
 
-| Agent | Kind | Model | Notes |
-|-------|------|-------|-------|
-| `job-match` | prompt | `gpt-5.6-sol` | routable specialist |
-| `career-coach` | prompt | `gpt-5.6-sol` | routable specialist |
-| `company-intel` | prompt | `gpt-5.6-sol` | routable specialist |
-| `career-hosted-solution` | hosted | — | whole-solution container agent (Option 2) |
+```bash
+python -m scripts.provision_agents list            # prompt agents: name + versions
+```
 
-All three specialists are Foundry-managed prompt agents (Foundry runs the model turn + MongoDB
-MCP tool calls when invoked by reference); `orchestrator` is intentionally **not** registered
-(`routable: false`, runs host-side). Re-create/refresh them any time with
-`python -m scripts.provision_agents sync`.
-
-> Model note: the registered prompt agents use `gpt-5.6-sol` (the provisioning default /
-> `cfg.model`), while the deployed container reads `AZURE_AI_MODEL_DEPLOYMENT_NAME` from `.env`
-> (currently `gpt-4o`) for its host-side classifier/synthesizer/inline-fallback. Keep these
-> aligned if you want one model across the board.
+For hosted agents, check the Foundry portal (Agents → Hosted agents).
 
 ## Notes / limits
 

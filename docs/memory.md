@@ -5,6 +5,33 @@ Implements [specs/001](../specs/001-foundry-short-term-memory/spec.md)
 
 ## Layers
 
+```mermaid
+flowchart TB
+    TURN["orchestrator.run_turn<br/>(each chat turn)"]
+
+    subgraph ST["Short-term history — SHORT_TERM_MEMORY_BACKEND"]
+        MONGO["backend = mongo (default)<br/>Atlas chat_messages"]
+        FND["backend = foundry<br/>Foundry Conversations (managed)"]
+    end
+
+    subgraph ATLAS["MongoDB Atlas (always)"]
+        CM[("chat_messages")]
+        FACTS[("agent_memory_facts<br/>unique (user_id, fact)")]
+        TRACES[("agent_traces<br/>per-turn audit")]
+        SESS[("chat_sessions<br/>session_id ↔ conversation_id")]
+    end
+
+    FCV["Foundry Conversations"]
+
+    TURN --> MONGO & FND
+    MONGO --> CM
+    FND --> FCV
+    FND -.->|mapping persisted| SESS
+    TURN -->|LLM-extracted facts, upsert-deduped| FACTS
+    TURN -->|routing · reasoning · tools · tokens · cost| TRACES
+    MONGO --> SESS
+```
+
 | Layer | Store | Backend / collection |
 |---|---|---|
 | Short-term (session history) | selectable | `mongo` → Atlas `chat_messages` (default) · `foundry` → Foundry Conversations |

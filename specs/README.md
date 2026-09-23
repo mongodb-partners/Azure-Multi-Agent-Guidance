@@ -22,7 +22,9 @@ specs/<NNN>-<slug>/
 4. **Implement** — code changes must trace back to requirement IDs (`R1`, `R2`, …).
    Every requirement maps to at least one acceptance criterion and one test.
 5. **Close** — when acceptance criteria pass, set status to `implemented` and link
-   the implementing commits/PRs.
+   the implementing commits/PRs. Per the repo's doc-maintenance rule (`AGENTS.md`,
+   spec 007), the same change must update any docs whose contracts the spec touched
+   (`README.md`, `docs/*.md`).
 
 ## Rules
 
@@ -46,3 +48,4 @@ specs/<NNN>-<slug>/
 | 004 | [Live reasoning streaming — direct replies and registered/inline parity](004-live-reasoning-streaming/spec.md) | implemented |
 | 005 | [Developer trace — raw SSE event JSON in the chat UI](005-developer-trace-raw-events/spec.md) | abandoned |
 | 006 | [QA & UAT plan](006-qa-uat-plan/spec.md) ([report](006-qa-uat-plan/qa-uat-report.md)) | approved |
+| 007 | [Documentation refresh — accuracy, architecture & workflow diagrams](007-documentation-refresh/spec.md) | implemented |

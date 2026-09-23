@@ -4,21 +4,33 @@ Implementation plan for four workstreams that bring the project toward the AWS
 Bedrock AgentCore Guidance's enterprise ring, mapped onto **this** stack
 (FastAPI + Foundry + Container Apps + Bicep + MongoDB Atlas).
 
-## Status (implemented in this pass)
+## Status
 
 | Workstream | Status | Key artifacts |
 |---|---|---|
 | Secret rotation + Key Vault | ✅ Done | `deploy/keyvault.bicep`, `main.bicep` KV refs + UAMI, `deploy.sh` secret push, `docs/secrets.md` |
 | Destroy script | ✅ Done | `deploy/destroy.sh`, README "Cleanup" |
-| Testing | ✅ Done | `pytest.ini`, `requirements-dev.txt`, `tests/{unit,integration,e2e}/`, `tests/conftest.py`, `smoke/post_deploy_smoke.py` (45 unit tests passing) |
-| Observability | ✅ Done | `src/telemetry.py`, wiring in `app.py`/`orchestrator.py`, `deploy/monitoring.bicep` (App Insights + workbook + 7 alerts) |
+| Testing | ✅ Done | `pytest.ini`, `requirements-dev.txt`, `tests/{unit,integration,e2e}/`, `tests/conftest.py`, `smoke/post_deploy_smoke.py` (105 unit tests collected; two env-dependent failures tracked as defect D3, specs/006) |
+| Observability | ✅ Done | `src/telemetry.py`, wiring in `app.py`/`orchestrator.py`, `deploy/monitoring.bicep` (App Insights + workbook + 5 alerts) |
 
 > ⚠️ **Action still required by you:** rotate the live Azure OpenAI key + Atlas
 > password currently in your local `.env` (they are not in git, but they are
 > live). Steps in `docs/secrets.md`.
 
-Remaining from the original gap analysis (not in this pass): Entra ID JWT auth,
-private networking to Atlas, rate limiting, CI/CD.
+### Remaining (open) — mapped to the README Security list (S1–S14)
+
+| Item | Status | Addresses |
+|---|---|---|
+| Entra ID JWT auth on the API + per-user authorization | ⬜ Open | S6 |
+| Private networking: internal MCP ingress / Private Endpoint / VNet to Atlas + Key Vault | ⬜ Open | S1, S4, S8, S11 |
+| Rate limiting / quotas at a gateway | ⬜ Open | S13 |
+| Egress restrictions (Atlas + Azure OpenAI + MCP only) | ⬜ Open | S14 |
+| CI/CD pipeline (build, test layers, deploy) | ⬜ Open | — (process) |
+| Disable ACR admin user; pull via managed identity only | ⬜ Open | S12 |
+| Restrict CORS to the UI origin(s) | ⬜ Open | S7 |
+
+No items are formally deferred — everything above is open work, sequenced per
+[Suggested sequencing](#suggested-sequencing) below.
 
 **MCP-runtime ownership — done:** the MongoDB MCP server is now **self-hosted** on Azure Container
 Apps (`deploy/mcp.bicep`), stack-owned and read-only, with a static API-key header. This replaced the
@@ -134,8 +146,8 @@ Azure Monitor**, with dashboards and metric alerts.
 ### Acceptance criteria
 - A `/chat` request produces an end-to-end trace in App Insights with
   classify → specialist → synthesize spans and MCP/Mongo child spans.
-- Workbook renders live metrics; all 7 alerts exist and can be manually triggered
-  in a test.
+- Workbook renders live metrics; all alerts exist and can be manually triggered
+  in a test (implemented as 5 — see Status above).
 - Local runs with no connection string still work (telemetry no-ops silently).
 
 ---
@@ -290,10 +302,10 @@ confirmation and mode to also remove the resource group.
   - Load `.env` / `.env.live` for names (ACR, prefix).
   - Confirm interactively unless `--yes` (echo what will be deleted).
   - Default: `az group delete -n "$RG" --yes --no-wait` (removes Container Apps
-    env, API/UI apps, ACR, Function, storage, Log Analytics, App Insights,
+    env, API/UI/MCP apps, ACR, storage, Log Analytics, App Insights,
     Key Vault*, monitoring resources in one shot).
   - `--keep-rg`: delete only the resources this stack created (Container Apps,
-    ACR, Function, storage, App Insights, workbook/alerts), leaving the RG and any
+    ACR, storage, App Insights, workbook/alerts), leaving the RG and any
     pre-existing resources intact.
 - **Explicitly NOT deleted** (documented in the script header + README): the
   **Foundry project/model deployments** and **MongoDB Atlas** data — these are

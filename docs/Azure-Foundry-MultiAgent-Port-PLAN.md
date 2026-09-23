@@ -1,8 +1,11 @@
+# Azure AI Foundry Multi-Agent Port — original plan (HISTORICAL)
 
-> **Historical planning doc.** This captures the original port plan. Some details have since
-> changed — notably the MongoDB MCP is now **self-hosted on Azure Container Apps** (not the managed
-> remote `https://mcp.mongodb.com`). For the current design see **[README.md](README.md)** and
-> **[docs/mcp-server.md](docs/mcp-server.md)**.
+> **Historical planning doc — the port described here is implemented.** This captures the
+> original port plan, kept for reference. Some details have since changed — notably the
+> MongoDB MCP is now **self-hosted on Azure Container Apps** (not the managed remote
+> `https://mcp.mongodb.com`). For the current, authoritative design see
+> **[README.md](../README.md)** and the other docs in [this folder](.) (start with
+> **[service-map.md](service-map.md)**).
 
 ## Context
 

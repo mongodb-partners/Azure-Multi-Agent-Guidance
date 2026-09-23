@@ -19,15 +19,25 @@ No MCP URL or credential is hardcoded — all values come from `.env` / `.env.li
   preconfigured, tool calls (`find`, `aggregate`, `count`, `list-collections`, `collection-schema`)
   run directly with a `database` + `collection` argument — no connect step.
 
+```mermaid
+sequenceDiagram
+    participant AG as Agent (inline / registered / hosted)
+    participant RT as Foundry Responses runtime
+    participant MCP as mongodb-mcp-server (Container App)
+    participant ATLAS as MongoDB Atlas
+
+    AG->>RT: responses.create (mcp tool attached via mcp_tool_dict())
+    Note over RT: server_url = &lt;fqdn&gt;/mcp<br/>headers = { X-MCP-Api-Key: … }<br/>or project_connection_id (registered agents)
+    RT->>MCP: Streamable HTTPS POST /mcp + X-MCP-Api-Key header
+    MCP->>MCP: validate header (MDB_MCP_HTTP_HEADERS)
+    MCP->>ATLAS: find / aggregate / count … (preconfigured MDB_MCP_CONNECTION_STRING)
+    ATLAS-->>MCP: documents
+    MCP-->>RT: tool result
+    RT-->>AG: answer grounded on MongoDB data
 ```
-agent turn ─▶ mcp_tool_dict() ─▶ { server_url: <fqdn>/mcp, headers: { X-MCP-Api-Key: … } }
-                                        │  Foundry / Responses runtime calls the MCP over HTTPS
-                                        ▼
-              self-hosted mongodb/mongodb-mcp-server (Azure Container Apps)
-                                        │  preconfigured MDB_MCP_CONNECTION_STRING
-                                        ▼
-                                 MongoDB Atlas cluster
-```
+
+Agents never hold DB credentials — the MCP container owns the connection string (sourced
+from Key Vault in the cloud stack).
 
 ## Authentication (API-key header)
 
@@ -65,15 +75,21 @@ header**:
 Run the MCP in Docker and point the app at it:
 
 ```bash
-docker run --rm -p 3000:3000 \
+docker run --rm -p 3001:3000 \
   -e MDB_MCP_CONNECTION_STRING="$MONGODB_URI" \
   -e MDB_MCP_TRANSPORT=http -e MDB_MCP_HTTP_HOST=0.0.0.0 -e MDB_MCP_HTTP_PORT=3000 \
   -e MDB_MCP_READ_ONLY=true \
+  -e MDB_MCP_DANGEROUS_HOST_BINDING=true \
   mongodb/mongodb-mcp-server:latest
 # .env:
-#   MONGODB_MCP_URL=http://localhost:3000/mcp
+#   MONGODB_MCP_URL=http://localhost:3001/mcp
 #   MCP_API_KEY=            (empty → no header required locally)
 ```
+
+> Use host port **3001**, not 3000 — the API defaults to `PORT=3000` and would collide with a
+> `-p 3000:3000` mapping. `MDB_MCP_DANGEROUS_HOST_BINDING=true` is required by current
+> (v3.x) `mongodb-mcp-server` images: the server refuses to bind `0.0.0.0` without it. Safe
+> here — Docker's port mapping exposes it to localhost only.
 
 ## In deployment
 
@@ -88,7 +104,7 @@ docker run --rm -p 3000:3000 \
 
 | Setting (`.env`) | Default | Purpose |
 |---|---|---|
-| `MONGODB_MCP_URL` | `http://localhost:3000/mcp` (local) | Self-hosted MCP endpoint (Streamable HTTP). Cloud value is written to `.env.live`. |
+| `MONGODB_MCP_URL` | `http://localhost:3000/mcp` (`.env.sample`; use host port **3001** locally to avoid colliding with the API's `PORT=3000`) | Self-hosted MCP endpoint (Streamable HTTP). Cloud value is written to `.env.live`. |
 | `MCP_API_KEY` | — | Shared API-key value the MCP validates (empty = unauthenticated). Stored in Key Vault in the cloud. |
 | `MCP_API_KEY_HEADER` | `X-MCP-Api-Key` | Header NAME the MCP validates (non-`Authorization`). |
 | `MONGODB_ALLOW_WRITE` | `false` | Exposes write tools in the agent tool surface (the MCP itself is also read-only by default). |
