@@ -346,7 +346,9 @@ class FoundrySpecialist:
         return Event(
             "tool_call",
             self.name,
-            {"tool": getattr(item, "name", "mcp"), "id": cid},
+            {"tool": getattr(item, "name", "mcp"), "id": cid,
+             # mcp_call items carry the tool arguments as a JSON string; may be absent.
+             "args": getattr(item, "arguments", None)},
         )
 
     def query(self, query: str, previous_response_id: str | None = None) -> str:

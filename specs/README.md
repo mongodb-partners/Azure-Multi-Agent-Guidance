@@ -49,3 +49,5 @@ specs/<NNN>-<slug>/
 | 005 | [Developer trace — raw SSE event JSON in the chat UI](005-developer-trace-raw-events/spec.md) | abandoned |
 | 006 | [QA & UAT plan](006-qa-uat-plan/spec.md) ([report](006-qa-uat-plan/qa-uat-report.md)) | approved |
 | 007 | [Documentation refresh — accuracy, architecture & workflow diagrams](007-documentation-refresh/spec.md) | implemented |
+| 008 | [Agent config alignment with the Bedrock-AgentCore reference + tool-call efficiency](008-agent-config-reference-alignment/spec.md) | implemented |
+| 009 | [Foundry-enriched agent traces](009-foundry-enriched-traces/spec.md) | draft |

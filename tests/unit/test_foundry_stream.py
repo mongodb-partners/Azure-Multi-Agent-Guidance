@@ -37,6 +37,23 @@ def _specialist():
     return spec
 
 
+def test_tool_call_event_includes_arguments():
+    # spec 008 R8: mcp_call items carry tool arguments; they must surface on the Event.
+    spec = _specialist()
+    item = _RespEv("mcp_call", id="call_1", name="find",
+                   arguments='{"collection": "jobs", "filter": {"remote": true}}')
+    ev = spec._tool_call_event(item, set())
+    assert ev is not None
+    assert ev.type == "tool_call"
+    assert ev.data["tool"] == "find"
+    assert ev.data["args"] == '{"collection": "jobs", "filter": {"remote": true}}'
+    # Already-seen id → no duplicate event.
+    assert spec._tool_call_event(item, {ev.data["id"]}) is None
+    # Item without arguments → args is None, event still emitted.
+    bare = spec._tool_call_event(_RespEv("mcp_call", id="call_2", name="count"), set())
+    assert bare is not None and bare.data["args"] is None
+
+
 def test_consume_stream_forwards_text_and_reasoning_deltas(monkeypatch):
     monkeypatch.setattr(fa, "_record_response_usage", lambda *_a, **_k: None)
     spec = _specialist()

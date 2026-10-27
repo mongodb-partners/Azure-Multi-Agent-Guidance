@@ -375,8 +375,8 @@ ui/               streamlit_app.py (chat + Usage&Cost sidebar) · theme.py (Mong
 tests/            unit/ (offline) · integration/ · e2e/ · conftest.py    smoke/ post-deploy check
 deploy/           main.bicep, keyvault.bicep, mcp.bicep, monitoring.bicep, Dockerfile.*, deploy.sh,
                   destroy.sh, provision_hosted.sh, provision_agents_hosted.sh
-docs/             service-map.md, foundry-agents.md, mcp-server.md, memory.md, secrets.md,
-                  HARDENING-PLAN.md, Azure-Foundry-MultiAgent-Port-PLAN.md (historical)
+docs/             service-map.md, data-access.md, foundry-agents.md, mcp-server.md, memory.md,
+                  secrets.md, HARDENING-PLAN.md, Azure-Foundry-MultiAgent-Port-PLAN.md (historical)
 ```
 
 ---
@@ -386,6 +386,7 @@ docs/             service-map.md, foundry-agents.md, mcp-server.md, memory.md, s
 | Doc | Contents |
 |---|---|
 | [docs/service-map.md](docs/service-map.md) | What service is used where and how — per-service files, APIs, env vars |
+| [docs/data-access.md](docs/data-access.md) | Why Atlas is exposed through two interfaces: direct pymongo vs the MCP server |
 | [docs/foundry-agents.md](docs/foundry-agents.md) | The three Foundry-native consumption options (prompt agents, hosted agent, four hosted agents) |
 | [docs/mcp-server.md](docs/mcp-server.md) | Self-hosted MongoDB MCP server: auth header, safety defaults, local dev, troubleshooting |
 | [docs/memory.md](docs/memory.md) | Memory layers and the `mongo` vs `foundry` short-term backend (specs/001) |

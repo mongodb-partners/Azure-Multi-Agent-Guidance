@@ -277,15 +277,16 @@ def _run_specialist(
                         yield _event("specialist_source", agent=specialist, source=source)
                 elif ev.type == "tool_call":
                     tool = ev.data.get("tool")
+                    args = ev.data.get("args")          # tool arguments (spec 008 R8); may be None
                     telemetry.record_tool_call(tool, agent=specialist)
                     telemetry.add_event(sp, "tool_call", tool=tool)
                     if trace is not None:
                         trace.tool_calls.append({"agent": specialist, "tool": tool,
-                                                 "id": ev.data.get("id")})
+                                                 "id": ev.data.get("id"), "args": args})
                         trace.step("MCP tool call",
                                    f"**{specialist}** called MongoDB MCP tool `{tool}`.",
-                                   agent=specialist, tool=tool)
-                    yield _event("tool_call", agent=specialist, tool=tool)
+                                   agent=specialist, tool=tool, args=args)
+                    yield _event("tool_call", agent=specialist, tool=tool, args=args)
                 elif ev.type == "reasoning":
                     # Live reasoning token chunk — forward for progressive rendering.
                     yield _event("reasoning", agent=specialist, text=ev.data.get("text", ""))

@@ -20,7 +20,7 @@ from .settings import get_settings
 
 _TOKEN_RE = re.compile(r"[a-z0-9]+")
 SELECT_THRESHOLD = 0.12          # min normalized score to be selected
-MULTI_SELECT_MARGIN = 0.75       # 2nd place must be >= this fraction of 1st to co-select
+MULTI_SELECT_MARGIN = 0.55       # 2nd place must be >= this fraction of 1st to co-select (spec 008)
 MAX_SPECIALISTS = 2
 
 

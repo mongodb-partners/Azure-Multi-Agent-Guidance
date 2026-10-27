@@ -174,21 +174,16 @@ if prompt := st.chat_input("Ask about jobs, career growth, or companies…"):
 
     with st.chat_message("assistant"):
         trace_box = st.expander("🔬 Agent trace", expanded=True)
-        reasoning_box = st.expander("🧠 Reasoning (live)", expanded=True)
-        reasoning_slot = reasoning_box.empty()
-        reasoning_slot.caption("_Waiting for the model to start reasoning…_")
         answer_box = st.empty()
         events: list[tuple[str, dict]] = []
         final_text = ""
         streamed_text = ""       # answer accumulated live from `delta` events
-        reasoning_text = ""      # reasoning accumulated live from `reasoning` events
         streamed_final = False   # True when `final` says the answer already streamed
         usage: dict = {}
         try:
             for etype, data in stream_chat(api_url, prompt, session_id, user_id):
                 if etype == "reasoning":
-                    reasoning_text += data.get("text", "")
-                    reasoning_slot.markdown(reasoning_text)
+                    pass  # reasoning events dropped — live reasoning section removed from the UI
                 elif etype == "delta":
                     # Live answer token chunk — append and re-render progressively.
                     streamed_text += data.get("text", "")

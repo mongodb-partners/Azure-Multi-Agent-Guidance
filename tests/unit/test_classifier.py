@@ -23,6 +23,9 @@ pytestmark = pytest.mark.unit
          {"job-match", "company-intel"}),
         ("help me prep for a staff engineer interview", {"career-coach"}),
         ("compare Nimbus Data and Helio Robotics as employers", {"company-intel"}),
+        # spec 008: the observed under-selection case — company comparison + roles fit.
+        (("compare Helio Robotics and Nimbus Data as employers, and suggest which of their "
+          "open roles fit a backend engineer"), {"company-intel", "job-match"}),
         ("show me senior backend openings in Austin", {"job-match"}),
         # Plural forms must route the same as singular (roles→role, openings→opening).
         ("find remote senior python roles", {"job-match"}),

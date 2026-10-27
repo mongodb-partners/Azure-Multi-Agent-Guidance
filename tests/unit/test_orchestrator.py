@@ -58,7 +58,8 @@ class _FakeSpecialist:
 
     def stream_query(self, _augmented):
         if self._tool:
-            yield _Ev("tool_call", tool=self._tool)
+            yield _Ev("tool_call", tool=self._tool,
+                      args='{"collection": "jobs", "filter": {"remote": true}}')
         if self._reasoning:
             for chunk in self._reasoning:
                 yield _Ev("reasoning", text=chunk)
@@ -187,6 +188,9 @@ def test_run_turn_single_specialist(monkeypatch):
     assert "routing" in types
     assert "specialist_start" in types
     assert "tool_call" in types
+    # spec 008 R8: tool-call arguments are forwarded on the SSE event.
+    tc = next(e for e in events if e["type"] == "tool_call")
+    assert tc["args"] == '{"collection": "jobs", "filter": {"remote": true}}'
     # Live streaming: reasoning + answer deltas are forwarded.
     assert "reasoning" in types
     assert "delta" in types
